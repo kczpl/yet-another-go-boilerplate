@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Binaries and build output
+/app
+/bin/
+dist/
+
+# Test artifacts
+*.out
+coverage.html
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
