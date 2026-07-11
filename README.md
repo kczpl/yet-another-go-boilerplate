@@ -5,8 +5,6 @@
   <img alt="net/http" src="https://img.shields.io/badge/net%2Fhttp-stdlib-00ADD8?logo=go&logoColor=white">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white">
   <img alt="pgx" src="https://img.shields.io/badge/pgx-v5-336791?logo=postgresql&logoColor=white">
-  <img alt="goose" src="https://img.shields.io/badge/goose-migrations-37814A?logo=go&logoColor=white">
-  <img alt="tests" src="https://img.shields.io/badge/tests-real%20postgres-2496ED?logo=docker&logoColor=white">
   <img alt="just" src="https://img.shields.io/badge/just-tasks-DE5FE9?logo=just&logoColor=white">
 </p>
 
@@ -28,15 +26,17 @@ main.go       run() pattern: config → pool → migrate → services → server
 config/       env-driven configuration
 api/          HTTP layer: server, routes.go (whole API surface), middleware, JSON + validation, handlers
 auth/         bearer-token middleware + Identity-in-context (swap for JWT, keep the contract)
-notes/        example domain: types + errors, service (business logic), repo (plain SQL)
+domains/      business domains, one package per domain
+  notes/      example domain: types + errors, service (business logic), repo (plain SQL)
 postgres/     pgx pool + embedded goose migrations (applied on startup)
 testdb/       per-test isolated databases, cloned from a migrated template
 ```
 
-Layers exist as **files inside a domain package** (`notes/service.go`,
-`notes/repo.go`), not as layer-named packages — the Go way. To add a domain:
-copy `notes/`, add a migration, register routes in `api/routes.go`, wire it in
-`main.go`.
+Layers exist as **files inside a domain package** (`domains/notes/service.go`,
+`domains/notes/repo.go`), not as layer-named packages — the Go way. Domains
+live together under `domains/`, so the root stays fixed as the app grows. To
+add a domain: copy `domains/notes/`, add a migration, register routes in
+`api/routes.go`, wire it in `main.go`.
 
 ## Quickstart
 

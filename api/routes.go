@@ -8,7 +8,7 @@ import (
 
 	"github.com/kczpl/yet-another-go-boilerplate/auth"
 	"github.com/kczpl/yet-another-go-boilerplate/config"
-	"github.com/kczpl/yet-another-go-boilerplate/notes"
+	"github.com/kczpl/yet-another-go-boilerplate/domains/notes"
 )
 
 // addRoutes is the single map of the whole API surface. Protected routes are

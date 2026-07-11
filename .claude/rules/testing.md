@@ -29,7 +29,7 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   `api.NewServer` exactly as `main` does (middleware + auth + routes), execute
   with `httptest.NewRecorder`. Covers status codes, envelopes, validation
   problems, auth (401), and 404s.
-- `<domain>/service_test.go` — business logic + SQL against a real database
+- `domains/<name>/service_test.go` — business logic + SQL against a real database
   (service tests exercise the repo; don't duplicate them with repo-only tests
   unless a query has behavior the service doesn't reach).
 - `auth/` — pure middleware unit tests with `httptest`, no database.

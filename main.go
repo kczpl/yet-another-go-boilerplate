@@ -16,7 +16,7 @@ import (
 
 	"github.com/kczpl/yet-another-go-boilerplate/api"
 	"github.com/kczpl/yet-another-go-boilerplate/config"
-	"github.com/kczpl/yet-another-go-boilerplate/notes"
+	"github.com/kczpl/yet-another-go-boilerplate/domains/notes"
 	"github.com/kczpl/yet-another-go-boilerplate/postgres"
 )
 

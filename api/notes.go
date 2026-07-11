@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/kczpl/yet-another-go-boilerplate/notes"
+	"github.com/kczpl/yet-another-go-boilerplate/domains/notes"
 )
 
 // Handlers are maker functions that close over their dependencies and return

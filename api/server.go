@@ -10,7 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kczpl/yet-another-go-boilerplate/config"
-	"github.com/kczpl/yet-another-go-boilerplate/notes"
+	"github.com/kczpl/yet-another-go-boilerplate/domains/notes"
 )
 
 // NewServer wires every dependency into a single http.Handler. The argument

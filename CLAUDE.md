@@ -28,20 +28,21 @@ reference and loads automatically for any Go work.
 
 ## Architecture
 
-Request flow: `api/routes.go → api handlers → <domain>/service.go → <domain>/repo.go`
+Request flow: `api/routes.go → api handlers → domains/<name>/service.go → domains/<name>/repo.go`
 
 ```
 main.go       run() pattern: config → pool → migrate → services → server; graceful shutdown
 config/       env-driven Config (Load(getenv))
 api/          HTTP layer: server.go, routes.go, middleware, json.go (decode/validate), handlers
 auth/         RequireAPIKey middleware + Identity-in-context (swap for JWT, keep the contract)
-notes/        example domain slice: types+errors, service (business logic), repo (SQL), tests
+domains/      business domains, one package per domain; root gains no new packages
+  notes/      example domain slice: types+errors, service (business logic), repo (SQL), tests
 postgres/     Connect, Migrate, embedded migrations/
 testdb/       per-test isolated databases cloned from a migrated template
 ```
 
-`notes` is the complete example vertical slice (migration → repo → service →
-handlers → tests). Copy it for a new domain, then delete it.
+`domains/notes` is the complete example vertical slice (migration → repo →
+service → handlers → tests). Copy it for a new domain, then delete it.
 
 ## Development
 

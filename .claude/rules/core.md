@@ -16,15 +16,19 @@ main.go       wiring only: config → pool → services → server (the only DI 
 config/       env-driven Config
 api/          HTTP layer: server, routes, middleware, JSON, validation, handlers
 auth/         authentication middleware + Identity-in-context
-notes/        example domain — business logic (service.go) + data access (repo.go)
+domains/      business domains, one package per domain (domains/notes is the example)
 postgres/     connection pool + embedded migrations
 testdb/       per-test isolated databases (cloned from a migrated template)
 ```
 
-- A new domain = a new top-level package. Copy `notes/` and adapt; keep the
-  `<domain>.go` (types + errors) / `service.go` / `repo.go` file split.
+- A new domain = a new package under `domains/`. Copy `domains/notes/` and
+  adapt; keep the `<domain>.go` (types + errors) / `service.go` / `repo.go`
+  file split. Everything outside `domains/` is infrastructure and should stay
+  as-is — the root gains no new packages as the app grows.
 - Layers live as **files inside a domain package**, never as layer-named
-  packages (`services/`, `repositories/`, `models/` are banned).
+  packages (`services/`, `repositories/`, `models/` are banned). `domains/` is
+  the only grouping directory — it groups by what code *is* (a business
+  domain), not by layer, and stays one level deep (no `domains/a/b/`).
 - Never create `utils/`, `helpers/`, `common/`, `pkg/`, or `internal/`.
 - Domain packages must not import `api/` or each other sideways. `api/` imports
   domains; `main.go` wires everything. Import cycles mean wrong boundaries.

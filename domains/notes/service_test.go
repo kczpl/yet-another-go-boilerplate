@@ -8,7 +8,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/uuid"
 
-	"github.com/kczpl/yet-another-go-boilerplate/notes"
+	"github.com/kczpl/yet-another-go-boilerplate/domains/notes"
 	"github.com/kczpl/yet-another-go-boilerplate/testdb"
 )
 
