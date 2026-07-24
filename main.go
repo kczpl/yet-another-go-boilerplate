@@ -33,6 +33,9 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 	defer stop()
 
 	cfg := config.Load(getenv)
+	if err := cfg.Validate(); err != nil {
+		return fmt.Errorf("invalid configuration: %w", err)
+	}
 	logger := newLogger(stdout, cfg)
 
 	pool, err := postgres.Connect(ctx, cfg.DatabaseURL)

@@ -6,7 +6,7 @@ No frameworks, no ORM, no DI container — explicit wiring in `main.go`.
 
 ## Quick Reference
 
-- Go 1.25 · router: stdlib `http.ServeMux` · DB: PostgreSQL 18 + `jackc/pgx/v5`
+- Go 1.26 · router: stdlib `http.ServeMux` · DB: PostgreSQL 18 + `jackc/pgx/v5`
 - Migrations: `pressly/goose` (embedded SQL, auto-applied on startup)
 - Logging: `log/slog` (text in development, JSON otherwise)
 - Task runner: `just` (see `justfile`)

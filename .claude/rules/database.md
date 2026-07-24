@@ -14,14 +14,24 @@ scanned. Migrations via `pressly/goose` (embedded, applied on startup).
 
 - One `Repo` struct per domain holding `*pgxpool.Pool`; one method per query;
   the SQL is a `const` right inside the method. No query builders.
+- Arguments are named: `@title` placeholders with `pgx.NamedArgs` — never
+  positional `$1`/`$2`. Ordering mistakes must be unrepresentable.
+- Rows are collected by column name, never scanned by position:
+  `pgx.CollectRows` / `pgx.CollectExactlyOneRow` with
+  `pgx.RowToStructByName[T]`. Domain structs carry `db:"column"` tags; extra
+  per-query columns (e.g. `total_count`) use a local row struct embedding the
+  domain type. No hand-written `rows.Next()` loops or `Scan` calls.
 - Writes use `RETURNING` and hand back the full row — never re-select.
 - Translate driver errors at the repo boundary: `pgx.ErrNoRows` →
   the domain sentinel (`ErrNotFound`); wrap everything else with action
   context (`fmt.Errorf("inserting note: %w", err)`).
-- Repos never begin/commit transactions. A multi-statement flow belongs to the
-  service: `pgx.BeginFunc(ctx, s.repo.db, func(tx pgx.Tx) error { ... })` with
-  repo methods that accept the query interface. Single statements are already
-  atomic — don't wrap them.
+- Repos never begin/commit transactions. When a service flow needs one, define
+  a small `DB` interface in the domain package (`Exec`/`Query`/`QueryRow` with
+  the pgx signatures — both `*pgxpool.Pool` and `pgx.Tx` satisfy it), let the
+  repo methods involved take it as their first parameter after `ctx`, and
+  compose in the service with
+  `pgx.BeginFunc(ctx, s.repo.db, func(tx pgx.Tx) error { ... })`.
+  Single statements are already atomic — don't wrap them.
 
 ## Schema Conventions
 

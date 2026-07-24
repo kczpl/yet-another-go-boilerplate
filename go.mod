@@ -1,6 +1,6 @@
 module github.com/kczpl/yet-another-go-boilerplate
 
-go 1.25.7
+go 1.26.5
 
 require (
 	github.com/google/go-cmp v0.7.0

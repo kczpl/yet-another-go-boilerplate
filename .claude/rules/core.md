@@ -39,6 +39,9 @@ testdb/       per-test isolated databases (cloned from a migrated template)
   `api.NewServer(logger, cfg, pool, services...)`. Adding a dependency means
   adding a parameter — the compiler then finds every wiring point.
 - No DI frameworks, no package-level singletons, no `init()`, no globals.
+- Only `config.Load` reads the environment, through its `getenv` argument.
+  Everything else receives `Config` (or just the field it needs) as a
+  parameter — `os.Getenv` never appears outside `config/` and `testdb/`.
 - Depend on concrete types until a second implementation actually exists;
   when you do need an interface, define it in the consuming package.
 
@@ -68,8 +71,10 @@ This template optimizes for readability and agentic editing, not DRY:
 - No generic repositories, generic services, or base structs.
 - Every SQL query is written out in the repo that uses it.
 
-## Use Current Go (1.25)
+## Use Current Go
 
+- `go.mod` pins the version (currently 1.26) and is authoritative. When
+  bumping, keep the Dockerfile (`golang:1.xx`) and CLAUDE.md in sync.
 - `any`, `for i := range n`, `min`/`max`, `cmp.Or` for defaults, `slices`/`maps`
   packages, `math/rand/v2`, `errors.Join`, `omitzero` JSON tags where useful.
 - Loop variables are per-iteration — never write `x := x` captures.

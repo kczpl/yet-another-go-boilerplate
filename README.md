@@ -1,7 +1,7 @@
 # yet-another-go-boilerplate
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white">
   <img alt="net/http" src="https://img.shields.io/badge/net%2Fhttp-stdlib-00ADD8?logo=go&logoColor=white">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white">
   <img alt="pgx" src="https://img.shields.io/badge/pgx-v5-336791?logo=postgresql&logoColor=white">
@@ -61,6 +61,7 @@ curl -H "Authorization: Bearer dev-secret-key" "localhost:8080/api/v1/notes?page
 | POST | `/api/v1/notes` | Bearer | 201; 422 with `problems` on validation |
 | GET | `/api/v1/notes` | Bearer | paginated (`page`, `page_size` ≤ 100) |
 | GET | `/api/v1/notes/{id}` | Bearer | 404 if missing |
+| PATCH | `/api/v1/notes/{id}` | Bearer | partial update; 404 if missing |
 | DELETE | `/api/v1/notes/{id}` | Bearer | 204 |
 
 Envelopes: `{"data": ...}` · `{"data": [...], "pagination": {...}}` ·

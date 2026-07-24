@@ -27,6 +27,7 @@ func addRoutes(
 	mux.Handle("POST /api/v1/notes", authed(handleNotesCreate(logger, notesService)))
 	mux.Handle("GET /api/v1/notes", authed(handleNotesList(logger, notesService)))
 	mux.Handle("GET /api/v1/notes/{id}", authed(handleNotesGet(logger, notesService)))
+	mux.Handle("PATCH /api/v1/notes/{id}", authed(handleNotesUpdate(logger, notesService)))
 	mux.Handle("DELETE /api/v1/notes/{id}", authed(handleNotesDelete(logger, notesService)))
 
 	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

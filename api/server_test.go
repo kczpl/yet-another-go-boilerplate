@@ -197,6 +197,43 @@ func TestListNotesPaginates(t *testing.T) {
 	})
 }
 
+func TestUpdateNote(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+
+	_, created := do(t, srv, http.MethodPost, "/api/v1/notes",
+		map[string]string{"title": "old", "content": "keep"})
+	id := created["data"].(map[string]any)["id"].(string)
+
+	status, body := do(t, srv, http.MethodPatch, "/api/v1/notes/"+id,
+		map[string]string{"title": "new"})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body: %v", status, http.StatusOK, body)
+	}
+	data := body["data"].(map[string]any)
+	if data["title"] != "new" {
+		t.Errorf("title = %v, want new", data["title"])
+	}
+	if data["content"] != "keep" {
+		t.Errorf("content = %v, want untouched keep", data["content"])
+	}
+
+	t.Run("empty body", func(t *testing.T) {
+		status, body := do(t, srv, http.MethodPatch, "/api/v1/notes/"+id, map[string]string{})
+		if status != http.StatusUnprocessableEntity {
+			t.Fatalf("status = %d, want %d; body: %v", status, http.StatusUnprocessableEntity, body)
+		}
+	})
+
+	t.Run("missing note", func(t *testing.T) {
+		status, _ := do(t, srv, http.MethodPatch, "/api/v1/notes/0197c2c2-0000-7000-8000-000000000000",
+			map[string]string{"title": "x"})
+		if status != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", status, http.StatusNotFound)
+		}
+	})
+}
+
 func TestDeleteNote(t *testing.T) {
 	t.Parallel()
 	srv := newTestServer(t)
@@ -225,5 +262,61 @@ func TestUnknownRouteIsJSON404(t *testing.T) {
 	}
 	if body["error"] != "not found" {
 		t.Errorf("error = %v, want not found", body["error"])
+	}
+}
+
+func TestRequestID(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+
+	t.Run("propagates incoming header", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/notes", nil)
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		req.Header.Set("X-Request-ID", "client-trace-1")
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("X-Request-ID"); got != "client-trace-1" {
+			t.Errorf("X-Request-ID = %q, want client-trace-1", got)
+		}
+	})
+
+	t.Run("generates when missing", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/notes", nil)
+		req.Header.Set("Authorization", "Bearer "+testAPIKey)
+		rec := httptest.NewRecorder()
+		srv.ServeHTTP(rec, req)
+
+		if got := rec.Header().Get("X-Request-ID"); got == "" {
+			t.Error("X-Request-ID is empty, want a generated id")
+		}
+	})
+}
+
+func TestCreateNoteRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
+	srv := newTestServer(t)
+
+	// Valid JSON larger than the 1 MiB MaxBytesReader cap (invalid junk fails
+	// as 400 before the reader hits the limit).
+	var body bytes.Buffer
+	body.WriteString(`{"title":"`)
+	body.Write(bytes.Repeat([]byte("x"), 1<<20))
+	body.WriteString(`"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/notes", &body)
+	req.Header.Set("Authorization", "Bearer "+testAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusRequestEntityTooLarge, rec.Body)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &decoded); err != nil {
+		t.Fatalf("decoding response: %v", err)
+	}
+	if decoded["error"] != "request body too large" {
+		t.Errorf("error = %v, want request body too large", decoded["error"])
 	}
 }

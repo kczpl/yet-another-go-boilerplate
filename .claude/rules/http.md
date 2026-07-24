@@ -17,7 +17,8 @@ The `api/` package follows Mat Ryer's patterns
   result in middleware. Tests construct the exact same server as `main`.
 - `api/routes.go` is the single map of the whole API surface. Every route is
   registered there and nowhere else; auth wrapping happens there too. Use
-  Go 1.22 mux patterns: `mux.Handle("GET /api/v1/notes/{id}", ...)`.
+  method+wildcard mux patterns — `mux.Handle("GET /api/v1/notes/{id}", ...)` —
+  and read path parameters with `r.PathValue("id")`. No router libraries.
 - The fallback route `mux.Handle("/", ...)` returns a JSON 404.
 
 ## Handlers
@@ -37,6 +38,8 @@ The `api/` package follows Mat Ryer's patterns
 - Decode with `decodeValid[T]`; on problems respond
   `422 {"error": "validation failed", "problems": {...}}`.
 - Malformed JSON → `400 {"error": "invalid json body"}`.
+- Bodies larger than 1 MiB → `413 {"error": "request body too large"}`
+  (`http.MaxBytesReader` in `decode`).
 - Path/query parameters are validated in the handler (e.g. `uuid.Parse`) and
   also answer 422 with a problems map.
 
@@ -45,8 +48,8 @@ The `api/` package follows Mat Ryer's patterns
 - Envelopes are defined once in `api/respond.go`:
   success `{"data": ...}`, lists `{"data": [...], "pagination": {...}}`,
   errors `{"error": "...", "problems": {...}?}`.
-- Status codes: 200 read, 201 create, 204 delete, 400 bad body, 401 auth,
-  404 missing, 422 validation, 500 unexpected.
+- Status codes: 200 read/update, 201 create, 204 delete, 400 bad body,
+  401 auth, 404 missing, 422 validation, 500 unexpected.
 - Unexpected errors go through `respondInternalError`: log the real error with
   the request context, return an opaque 500. Never leak internals to clients.
 
@@ -55,6 +58,8 @@ The `api/` package follows Mat Ryer's patterns
 - Middleware is `func(http.Handler) http.Handler`; middleware with
   dependencies is a function returning that. Composed only in `NewServer`
   (cross-cutting) or `addRoutes` (per-route, e.g. auth).
+- `logRequests` assigns `X-Request-ID` (propagate or generate) and stores it
+  on the request context (`RequestIDFromContext`); error/panic logs include it.
 - Auth lives in `auth/` and **only** there: it verifies credentials and stores
   `auth.Identity` in the context. Handlers/services read
   `auth.FromContext(ctx)` — they never touch the Authorization header.

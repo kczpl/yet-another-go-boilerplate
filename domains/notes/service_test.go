@@ -92,6 +92,46 @@ func TestListPaginatesNewestFirst(t *testing.T) {
 	}
 }
 
+func TestUpdatePartial(t *testing.T) {
+	t.Parallel()
+	service := newService(t)
+	ctx := t.Context()
+
+	created, err := service.Create(ctx, notes.CreateParams{Title: "before", Content: "keep me"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	title := "  after  "
+	updated, err := service.Update(ctx, created.ID, notes.UpdateParams{Title: &title})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if updated.Title != "after" {
+		t.Errorf("Title = %q, want trimmed %q", updated.Title, "after")
+	}
+	if updated.Content != "keep me" {
+		t.Errorf("Content = %q, want untouched %q", updated.Content, "keep me")
+	}
+	if !updated.CreatedAt.Equal(created.CreatedAt) {
+		t.Errorf("CreatedAt changed: %v -> %v", created.CreatedAt, updated.CreatedAt)
+	}
+	if !updated.UpdatedAt.After(created.UpdatedAt) {
+		t.Errorf("UpdatedAt not bumped: %v -> %v", created.UpdatedAt, updated.UpdatedAt)
+	}
+}
+
+func TestUpdateNotFound(t *testing.T) {
+	t.Parallel()
+	service := newService(t)
+
+	title := "anything"
+	_, err := service.Update(t.Context(), uuid.New(), notes.UpdateParams{Title: &title})
+	if !errors.Is(err, notes.ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestDelete(t *testing.T) {
 	t.Parallel()
 	service := newService(t)

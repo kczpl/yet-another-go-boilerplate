@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"log/slog"
@@ -8,8 +9,17 @@ import (
 	"time"
 )
 
+type requestIDKey struct{}
+
+// RequestIDFromContext returns the id stored by logRequests, or "" if none.
+func RequestIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(requestIDKey{}).(string)
+	return id
+}
+
 // logRequests logs one line per request and tags the response with a request
-// id (propagating an incoming X-Request-ID). /healthz is skipped to keep
+// id (propagating an incoming X-Request-ID). The id is also stored on the
+// request context for error logs and handlers. /healthz is skipped to keep
 // probe noise out of the logs.
 func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -23,6 +33,7 @@ func logRequests(logger *slog.Logger, next http.Handler) http.Handler {
 			requestID = newRequestID()
 		}
 		w.Header().Set("X-Request-ID", requestID)
+		r = r.WithContext(context.WithValue(r.Context(), requestIDKey{}, requestID))
 
 		start := time.Now()
 		rw := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
@@ -44,7 +55,12 @@ func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if v := recover(); v != nil {
-				logger.Error("panic recovered", "panic", v, "method", r.Method, "path", r.URL.Path)
+				logger.Error("panic recovered",
+					"panic", v,
+					"method", r.Method,
+					"path", r.URL.Path,
+					"request_id", RequestIDFromContext(r.Context()),
+				)
 				respondError(w, http.StatusInternalServerError, "internal server error", nil)
 			}
 		}()
@@ -53,6 +69,8 @@ func recoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 }
 
 // statusRecorder captures the status code for the request log.
+// Unwrap lets http.ResponseController and similar helpers reach the
+// underlying writer (flush, deadlines, hijack).
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
@@ -61,6 +79,10 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(status int) {
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
 }
 
 func newRequestID() string {

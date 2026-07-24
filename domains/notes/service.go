@@ -32,6 +32,15 @@ func (s *Service) List(ctx context.Context, params ListParams) ([]Note, int, err
 	return s.repo.List(ctx, params)
 }
 
+// Update applies a partial update; nil fields keep their current value.
+func (s *Service) Update(ctx context.Context, id uuid.UUID, params UpdateParams) (Note, error) {
+	if params.Title != nil {
+		title := strings.TrimSpace(*params.Title)
+		params.Title = &title
+	}
+	return s.repo.Update(ctx, id, params)
+}
+
 func (s *Service) Delete(ctx context.Context, id uuid.UUID) error {
 	return s.repo.Delete(ctx, id)
 }

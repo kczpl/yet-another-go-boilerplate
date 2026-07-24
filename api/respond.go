@@ -35,6 +35,11 @@ func respondError(w http.ResponseWriter, status int, message string, problems ma
 // an opaque 500 — internals never leak to clients, and errors are logged
 // exactly once, here at the boundary.
 func respondInternalError(w http.ResponseWriter, logger *slog.Logger, r *http.Request, err error) {
-	logger.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
+	logger.Error("request failed",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"request_id", RequestIDFromContext(r.Context()),
+		"err", err,
+	)
 	respondError(w, http.StatusInternalServerError, "internal server error", nil)
 }
