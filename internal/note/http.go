@@ -22,7 +22,9 @@ var notesTmpl = web.MustPage(templatesFS, "templates/notes.html")
 func Routes(mux *http.ServeMux, logger *slog.Logger, svc *Service) {
 	mux.Handle("GET /notes", auth.RequireIdentity(web.E(logger, handleNotes(svc))))
 	mux.Handle("POST /notes", auth.RequireIdentity(web.E(logger, handleNoteAdd(svc))))
-	mux.Handle("DELETE /notes/{id}", auth.RequireIdentity(web.E(logger, handleNoteDelete(svc))))
+	// Delete is a POST, not a DELETE: a plain HTML form can only send GET
+	// and POST, and every flow must work without JavaScript.
+	mux.Handle("POST /notes/{id}/delete", auth.RequireIdentity(web.E(logger, handleNoteDelete(svc))))
 }
 
 type noteForm struct {

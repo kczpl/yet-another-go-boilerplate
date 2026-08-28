@@ -205,6 +205,10 @@ ul.notes li:first-child { border-top: 1px solid var(--border); }
 
 ul.notes button { padding: 0.25rem 0.6rem; font-size: 0.6875rem; }
 
+/* The delete form wraps one button. Neutralize the form-grid gap and any
+   margin, so the button sits flush in the flex row. */
+ul.notes li form { margin: 0; gap: 0; }
+
 /* Keep the line breaks of the note. Wrap long words. */
 .note-text {
   flex: 1;

@@ -276,7 +276,7 @@ func TestHomeRedirects(t *testing.T) {
 	}
 }
 
-var noteIDPattern = regexp.MustCompile(`hx-delete="/notes/([0-9a-f-]{36})"`)
+var noteIDPattern = regexp.MustCompile(`hx-post="/notes/([0-9a-f-]{36})/delete"`)
 
 func TestNotesFlow(t *testing.T) {
 	t.Parallel()
@@ -299,22 +299,49 @@ func TestNotesFlow(t *testing.T) {
 
 	match := noteIDPattern.FindStringSubmatch(rec.Body.String())
 	if match == nil {
-		t.Fatalf("no hx-delete note id in body:\n%s", rec.Body.String())
+		t.Fatalf("no delete note id in body:\n%s", rec.Body.String())
 	}
 	noteID := match[1]
 
 	// Delete the note via htmx. The note is gone, and the empty state is
 	// back.
-	rec = c.do(http.MethodDelete, "/notes/"+noteID, nil, true)
+	rec = c.do(http.MethodPost, "/notes/"+noteID+"/delete", nil, true)
 	wantStatus(t, rec, http.StatusOK)
 	wantContains(t, rec, "No notes yet")
 
 	// A second delete, or a delete with a garbage id, causes a calm
 	// re-render, not an error.
-	rec = c.do(http.MethodDelete, "/notes/"+noteID, nil, true)
+	rec = c.do(http.MethodPost, "/notes/"+noteID+"/delete", nil, true)
 	wantStatus(t, rec, http.StatusOK)
-	rec = c.do(http.MethodDelete, "/notes/not-a-uuid", nil, true)
+	rec = c.do(http.MethodPost, "/notes/not-a-uuid/delete", nil, true)
 	wantStatus(t, rec, http.StatusOK)
+}
+
+func TestNoteDeleteNoJS(t *testing.T) {
+	t.Parallel()
+	c := newClient(t)
+	c.register("bob@example.com", "Bob", "s3cret-pass")
+
+	// Add the note with a plain form post (PRG).
+	rec := c.postForm("/notes", url.Values{"text": {"Buy milk"}})
+	wantStatus(t, rec, http.StatusSeeOther)
+
+	rec = c.get("/notes")
+	wantStatus(t, rec, http.StatusOK)
+	match := noteIDPattern.FindStringSubmatch(rec.Body.String())
+	if match == nil {
+		t.Fatalf("no delete note id in body:\n%s", rec.Body.String())
+	}
+
+	// The delete form posts without JavaScript and redirects back (PRG).
+	rec = c.postForm("/notes/"+match[1]+"/delete", nil)
+	wantStatus(t, rec, http.StatusSeeOther)
+	if got := rec.Header().Get("Location"); got != "/notes" {
+		t.Fatalf("Location = %q, want /notes", got)
+	}
+	rec = c.get("/notes")
+	wantStatus(t, rec, http.StatusOK)
+	wantContains(t, rec, "No notes yet")
 }
 
 func TestDashboardEmbedsNotes(t *testing.T) {

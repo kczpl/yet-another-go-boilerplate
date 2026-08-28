@@ -21,10 +21,14 @@
     {{range .Notes}}
     <li>
       <p class="note-text">{{.Text}}</p>
-      <button type="button" class="danger"
-              hx-delete="/notes/{{.ID}}"
-              hx-target="#notes-section" hx-swap="outerHTML"
-              hx-confirm="Remove this note?">Remove</button>
+      {{/* The form makes delete work without JavaScript; htmx upgrades
+           it to a fragment swap. */}}
+      <form method="post" action="/notes/{{.ID}}/delete"
+            hx-post="/notes/{{.ID}}/delete"
+            hx-target="#notes-section" hx-swap="outerHTML"
+            hx-confirm="Remove this note?">
+        <button type="submit" class="danger">Remove</button>
+      </form>
     </li>
     {{end}}
   </ul>
