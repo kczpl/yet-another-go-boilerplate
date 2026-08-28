@@ -19,15 +19,16 @@ build:
 fmt:
   gofmt -l -w .
 
-# Run go vet and check the format
+# Run go vet, staticcheck, and check the format
 lint:
   go vet ./...
+  go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
   @unformatted="$(gofmt -l .)"; if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
 
-# Run the tests against the real test database
+# Run the tests (with the race detector) against the real test database
 test *flags="":
   docker compose up -d --wait postgres-test
-  go test ./... {{ flags }}
+  go test -race ./... {{ flags }}
 
 ci: lint test
 
@@ -43,8 +44,9 @@ adduser email name:
 makemigration name:
   #!/usr/bin/env bash
   set -euo pipefail
-  next=$(printf "%04d" $(( $(ls migrations/*.sql 2>/dev/null | wc -l) + 1 )))
-  file="migrations/${next}_{{ name }}.sql"
+  # A UTC timestamp prefix cannot collide across branches, unlike a
+  # sequence number. Lexical order stays correct.
+  file="migrations/$(date -u +%Y%m%d%H%M%S)_{{ name }}.sql"
   printf -- '-- Write forward-only SQL. Migrations are append-only.\n-- Never edit an applied file. Add a new file instead.\n\n' > "$file"
   echo "created $file"
 

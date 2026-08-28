@@ -11,7 +11,9 @@ import (
 )
 
 // FS holds the migration files. database.Migrate applies them in lexical
-// filename order, so keep the numeric prefix (just makemigration adds it).
+// filename order, so keep the UTC timestamp prefix (just makemigration
+// adds it). Timestamps do not collide across branches, unlike sequence
+// numbers.
 //
 //go:embed *.sql
 var FS embed.FS
