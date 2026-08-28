@@ -29,6 +29,11 @@ import (
 // advisoryLockID makes parallel tests and test binaries create and clone
 // the template one at a time. Postgres rejects concurrent operations on a
 // database that is in use as a clone source.
+//
+// If the suite grows and this lock becomes the bottleneck, narrow it to
+// the template creation and let the clones run in parallel. Measure
+// first: some PostgreSQL versions serialize clones of one template on
+// their own.
 const advisoryLockID = 987_654_321
 
 // New returns a pool that is connected to a fresh, fully migrated database.

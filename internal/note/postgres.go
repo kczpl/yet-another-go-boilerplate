@@ -22,6 +22,11 @@ func NewRepo(db *pgxpool.Pool) *Repo {
 
 const noteColumns = "id, user_id, text, created_at, updated_at"
 
+// listLimit caps ListByUser. The page shows one screen of notes, and an
+// unbounded query gets slower as an account ages. If users need more, add
+// keyset pagination: filter on (created_at, id) < the last visible row.
+const listLimit = 100
+
 func (r *Repo) Insert(ctx context.Context, userID, text string) (Note, error) {
 	rows, _ := r.db.Query(ctx, `
 		INSERT INTO notes (user_id, text)
@@ -42,8 +47,9 @@ func (r *Repo) ListByUser(ctx context.Context, userID string) ([]Note, error) {
 	rows, _ := r.db.Query(ctx,
 		"SELECT "+noteColumns+` FROM notes
 		WHERE user_id = @user_id
-		ORDER BY created_at DESC, id DESC`,
-		pgx.NamedArgs{"user_id": userID})
+		ORDER BY created_at DESC, id DESC
+		LIMIT @limit`,
+		pgx.NamedArgs{"user_id": userID, "limit": listLimit})
 	notes, err := pgx.CollectRows(rows, pgx.RowToStructByName[Note])
 	if err != nil {
 		return nil, fmt.Errorf("listing notes: %w", err)

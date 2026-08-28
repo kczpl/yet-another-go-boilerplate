@@ -33,7 +33,7 @@ func (s *Service) Add(ctx context.Context, userID, text string) (Note, error) {
 	return s.repo.Insert(ctx, userID, text)
 }
 
-// List returns userID's notes, newest first.
+// List returns userID's notes, newest first, at most listLimit rows.
 func (s *Service) List(ctx context.Context, userID string) ([]Note, error) {
 	return s.repo.ListByUser(ctx, userID)
 }
