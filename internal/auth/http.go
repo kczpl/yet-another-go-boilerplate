@@ -10,15 +10,15 @@ import (
 // Routes registers the endpoints that auth owns. Only logout is pure
 // session work; login lives in the user feature.
 func Routes(mux *http.ServeMux, logger *slog.Logger, sessions *Service) {
-	mux.Handle("POST /logout", handleLogout(logger, sessions))
+	mux.Handle("POST /logout", web.E(logger, handleLogout(sessions)))
 }
 
-func handleLogout(logger *slog.Logger, sessions *Service) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func handleLogout(sessions *Service) web.HandlerE {
+	return func(w http.ResponseWriter, r *http.Request) error {
 		if err := sessions.End(r.Context(), w, r); err != nil {
-			web.InternalError(logger, w, r, err)
-			return
+			return err
 		}
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
-	})
+		return nil
+	}
 }

@@ -95,12 +95,18 @@ func RespondError(logger *slog.Logger, w http.ResponseWriter, r *http.Request, e
 		})
 		return
 	}
-	RenderPage(r.Context(), logger, w, httpErr.Status, errorTmpl, errorData{
+	renderErr := RenderPage(w, httpErr.Status, errorTmpl, errorData{
 		Page:       Page{Title: http.StatusText(httpErr.Status)},
 		Status:     httpErr.Status,
 		StatusText: http.StatusText(httpErr.Status),
 		Msg:        msg,
 	})
+	if renderErr != nil {
+		// The error page itself did not render. Fall back to plain text,
+		// so the client still gets the right status.
+		logger.ErrorContext(r.Context(), "rendering error page", "error", renderErr)
+		http.Error(w, msg, httpErr.Status)
+	}
 }
 
 type errorData struct {

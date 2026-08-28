@@ -5,11 +5,10 @@ package web
 
 import (
 	"bytes"
-	"context"
 	"embed"
+	"fmt"
 	"html/template"
 	"io/fs"
-	"log/slog"
 	"net/http"
 )
 
@@ -34,29 +33,29 @@ func MustPage(feature fs.FS, page string) *template.Template {
 	return template.Must(t.ParseFS(feature, page))
 }
 
-// RenderPage renders the full layout with the page's content.
-func RenderPage(ctx context.Context, logger *slog.Logger, w http.ResponseWriter, status int, t *template.Template, data any) {
-	render(ctx, logger, w, status, t, "layout.html", data)
+// RenderPage renders the full layout with the page's content. The handler
+// returns the error, and web.E turns it into the unified 500.
+func RenderPage(w http.ResponseWriter, status int, t *template.Template, data any) error {
+	return render(w, status, t, "layout.html", data)
 }
 
 // RenderFragment renders one named template without the layout. htmx swaps
 // this response into its hx-target.
-func RenderFragment(ctx context.Context, logger *slog.Logger, w http.ResponseWriter, status int, t *template.Template, name string, data any) {
-	render(ctx, logger, w, status, t, name, data)
+func RenderFragment(w http.ResponseWriter, status int, t *template.Template, name string, data any) error {
+	return render(w, status, t, name, data)
 }
 
-// render buffers the output, so a mid-render error can still become a clean
-// 500, not a half-written page.
-func render(ctx context.Context, logger *slog.Logger, w http.ResponseWriter, status int, t *template.Template, name string, data any) {
+// render buffers the output, so a mid-render error returns before the first
+// byte reaches the client and can still become a clean 500.
+func render(w http.ResponseWriter, status int, t *template.Template, name string, data any) error {
 	var buf bytes.Buffer
 	if err := t.ExecuteTemplate(&buf, name, data); err != nil {
-		logger.ErrorContext(ctx, "rendering template", "template", name, "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
-		return
+		return fmt.Errorf("rendering template %s: %w", name, err)
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	_, _ = buf.WriteTo(w)
+	return nil
 }
 
 // IsHTMX reports whether htmx issued the request. Handlers use it to choose
@@ -64,12 +63,6 @@ func render(ctx context.Context, logger *slog.Logger, w http.ResponseWriter, sta
 // JavaScript.
 func IsHTMX(r *http.Request) bool {
 	return r.Header.Get("HX-Request") == "true"
-}
-
-// InternalError logs an unexpected error and sends the unified opaque 500.
-// Never leak err to the client.
-func InternalError(logger *slog.Logger, w http.ResponseWriter, r *http.Request, err error) {
-	RespondError(logger, w, r, err)
 }
 
 // Static serves the embedded /static/* assets (htmx, stylesheet).

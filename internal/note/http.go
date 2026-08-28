@@ -20,9 +20,9 @@ var notesTmpl = web.MustPage(templatesFS, "templates/notes.html")
 // Routes registers every endpoint of the feature. Add new routes here and
 // wrap them with auth.RequireIdentity.
 func Routes(mux *http.ServeMux, logger *slog.Logger, svc *Service) {
-	mux.Handle("GET /notes", auth.RequireIdentity(handleNotes(logger, svc)))
-	mux.Handle("POST /notes", auth.RequireIdentity(handleNoteAdd(logger, svc)))
-	mux.Handle("DELETE /notes/{id}", auth.RequireIdentity(handleNoteDelete(logger, svc)))
+	mux.Handle("GET /notes", auth.RequireIdentity(web.E(logger, handleNotes(svc))))
+	mux.Handle("POST /notes", auth.RequireIdentity(web.E(logger, handleNoteAdd(svc))))
+	mux.Handle("DELETE /notes/{id}", auth.RequireIdentity(web.E(logger, handleNoteDelete(svc))))
 }
 
 type noteForm struct {
@@ -43,45 +43,45 @@ func newNotesData(notes []Note) notesData {
 	}
 }
 
-func handleNotes(logger *slog.Logger, svc *Service) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func handleNotes(svc *Service) web.HandlerE {
+	return func(w http.ResponseWriter, r *http.Request) error {
 		identity, _ := auth.IdentityFromContext(r.Context())
 		notes, err := svc.List(r.Context(), identity.UserID)
 		if err != nil {
-			web.InternalError(logger, w, r, err)
-			return
+			return err
 		}
 		// htmx (the /me dashboard embed) gets the bare fragment. Browsers
 		// get the full page.
 		if web.IsHTMX(r) {
-			web.RenderFragment(r.Context(), logger, w, http.StatusOK, notesTmpl, "notes-section", newNotesData(notes))
-			return
+			return web.RenderFragment(w, http.StatusOK, notesTmpl, "notes-section", newNotesData(notes))
 		}
-		web.RenderPage(r.Context(), logger, w, http.StatusOK, notesTmpl, newNotesData(notes))
-	})
+		return web.RenderPage(w, http.StatusOK, notesTmpl, newNotesData(notes))
+	}
 }
 
-func handleNoteAdd(logger *slog.Logger, svc *Service) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func handleNoteAdd(svc *Service) web.HandlerE {
+	return func(w http.ResponseWriter, r *http.Request) error {
+		// A malformed or too-large body is a client fault, not a 500.
+		if err := r.ParseForm(); err != nil {
+			return web.BadRequest("invalid form data")
+		}
 		identity, _ := auth.IdentityFromContext(r.Context())
 		form := noteForm{Text: r.FormValue("text")}
 
 		_, err := svc.Add(r.Context(), identity.UserID, form.Text)
 		var vErr ValidationError
 		if errors.As(err, &vErr) {
-			respondNotes(logger, w, r, svc, identity.UserID, form, vErr.Error())
-			return
+			return respondNotes(w, r, svc, identity.UserID, form, vErr.Error())
 		}
 		if err != nil {
-			web.InternalError(logger, w, r, err)
-			return
+			return err
 		}
-		respondNotes(logger, w, r, svc, identity.UserID, noteForm{}, "")
-	})
+		return respondNotes(w, r, svc, identity.UserID, noteForm{}, "")
+	}
 }
 
-func handleNoteDelete(logger *slog.Logger, svc *Service) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+func handleNoteDelete(svc *Service) web.HandlerE {
+	return func(w http.ResponseWriter, r *http.Request) error {
 		identity, _ := auth.IdentityFromContext(r.Context())
 		id := r.PathValue("id")
 
@@ -95,21 +95,19 @@ func handleNoteDelete(logger *slog.Logger, svc *Service) http.Handler {
 		// ErrNotFound falls through to the re-render: a repeated delete is
 		// not an error (idempotent UX).
 		if err != nil && !errors.Is(err, ErrNotFound) {
-			web.InternalError(logger, w, r, err)
-			return
+			return err
 		}
-		respondNotes(logger, w, r, svc, identity.UserID, noteForm{}, "")
-	})
+		return respondNotes(w, r, svc, identity.UserID, noteForm{}, "")
+	}
 }
 
 // respondNotes re-renders the notes section. htmx gets the fragment. Plain
 // browsers get a redirect on success and a full 422 page on an error, so
 // the flow works without JavaScript.
-func respondNotes(logger *slog.Logger, w http.ResponseWriter, r *http.Request, svc *Service, userID string, form noteForm, errMsg string) {
+func respondNotes(w http.ResponseWriter, r *http.Request, svc *Service, userID string, form noteForm, errMsg string) error {
 	notes, err := svc.List(r.Context(), userID)
 	if err != nil {
-		web.InternalError(logger, w, r, err)
-		return
+		return err
 	}
 	data := newNotesData(notes)
 	data.Form = form
@@ -120,14 +118,13 @@ func respondNotes(logger *slog.Logger, w http.ResponseWriter, r *http.Request, s
 		status = http.StatusUnprocessableEntity
 	}
 	if web.IsHTMX(r) {
-		web.RenderFragment(r.Context(), logger, w, status, notesTmpl, "notes-section", data)
-		return
+		return web.RenderFragment(w, status, notesTmpl, "notes-section", data)
 	}
 	if errMsg == "" {
 		http.Redirect(w, r, "/notes", http.StatusSeeOther)
-		return
+		return nil
 	}
-	web.RenderPage(r.Context(), logger, w, status, notesTmpl, data)
+	return web.RenderPage(w, status, notesTmpl, data)
 }
 
 // isUUID checks the canonical 8-4-4-4-12 form. It keeps garbage out of the
