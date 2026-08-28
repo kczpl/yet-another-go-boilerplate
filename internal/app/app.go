@@ -71,7 +71,10 @@ func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handle
 	return handler
 }
 
-// handleHealthz reports that the service and the database are alive.
+// handleHealthz reports that the service and the database are alive. It
+// stays a plain http.Handler on purpose: load-balancer probes expect a
+// plain text body, and a database outage must not spam the error log
+// through web.E on every probe.
 func handleHealthz(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
