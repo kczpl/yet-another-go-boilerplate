@@ -411,6 +411,44 @@ func TestCrossOriginPostRejected(t *testing.T) {
 	wantStatus(t, rec, http.StatusForbidden)
 }
 
+func TestSecurityHeaders(t *testing.T) {
+	t.Parallel()
+	c := newClient(t)
+
+	rec := c.get("/login")
+	wantStatus(t, rec, http.StatusOK)
+	want := map[string]string{
+		"Content-Security-Policy": "default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'self'",
+		"X-Content-Type-Options":  "nosniff",
+		"X-Frame-Options":         "DENY",
+		"Referrer-Policy":         "same-origin",
+	}
+	for name, wantValue := range want {
+		if got := rec.Header().Get(name); got != wantValue {
+			t.Errorf("%s = %q, want %q", name, got, wantValue)
+		}
+	}
+
+	// Static assets add the cache header. A deploy replaces the binary and
+	// with it the assets.
+	rec = c.get("/static/style.css")
+	wantStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=3600" {
+		t.Errorf("Cache-Control = %q, want %q", got, "public, max-age=3600")
+	}
+}
+
+func TestRequestBodyLimit(t *testing.T) {
+	t.Parallel()
+	c := newClient(t)
+	c.register("bob@example.com", "Bob", "s3cret-pass")
+
+	// A 2 MiB body exceeds the 1 MiB cap. ParseForm fails in the handler,
+	// and the client gets a 400, not a 500.
+	rec := c.postForm("/notes", url.Values{"text": {strings.Repeat("a", 2<<20)}})
+	wantStatus(t, rec, http.StatusBadRequest)
+}
+
 func TestHealthz(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)

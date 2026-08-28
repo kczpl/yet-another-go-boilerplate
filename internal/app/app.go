@@ -20,6 +20,10 @@ import (
 
 const sessionTTL = 7 * 24 * time.Hour
 
+// maxRequestBytes caps every request body. The largest legitimate body in
+// this app is a small HTML form; 1 MiB leaves generous room.
+const maxRequestBytes = 1 << 20
+
 // New wires every feature and returns the complete HTTP handler. This is
 // the only wiring point: register a new feature here — construct its
 // service, then call its Routes below.
@@ -28,27 +32,40 @@ func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handle
 	notes := note.NewService(note.NewRepo(pool))
 	sessions := auth.NewService(auth.NewRepo(pool), sessionTTL, !cfg.Development())
 
-	mux := http.NewServeMux()
-	mux.Handle("GET /healthz", handleHealthz(pool))
-	mux.Handle("GET /static/", web.Static())
-
-	auth.Routes(mux, logger, sessions)
-	user.Routes(mux, logger, users, sessions)
-	note.Routes(mux, logger, notes)
+	// The pages mux holds every feature route. It sits behind the session
+	// and CSRF middleware.
+	pages := http.NewServeMux()
+	auth.Routes(pages, logger, sessions)
+	user.Routes(pages, logger, users, sessions)
+	note.Routes(pages, logger, notes)
 
 	// The pattern "/" catches every request that no other route matches.
 	// The unified 404 replaces the stdlib text response.
-	mux.Handle("/", web.E(logger, func(w http.ResponseWriter, r *http.Request) error {
+	pages.Handle("/", web.E(logger, func(w http.ResponseWriter, r *http.Request) error {
 		return web.NotFound("this page does not exist")
 	}))
 
-	// Wrap the middleware, innermost first. CrossOriginProtection (stdlib)
-	// is the CSRF guard: it rejects cross-origin non-GET requests by their
-	// Sec-Fetch-Site and Origin headers, so no tokens are necessary. Do not
-	// remove it.
-	var handler http.Handler = mux
-	handler = sessions.LoadIdentity(logger, handler)
-	handler = http.NewCrossOriginProtection().Handler(handler)
+	// Wrap the page middleware, innermost first. CrossOriginProtection
+	// (stdlib) is the CSRF guard: it rejects cross-origin non-GET requests
+	// by their Sec-Fetch-Site and Origin headers, so no tokens are
+	// necessary. Do not remove it.
+	var pageHandler http.Handler = pages
+	pageHandler = sessions.LoadIdentity(logger, pageHandler)
+	pageHandler = http.NewCrossOriginProtection().Handler(pageHandler)
+
+	// The root mux keeps health probes and static assets outside the
+	// session and CSRF middleware: they are anonymous GETs and must not
+	// cost a database lookup.
+	root := http.NewServeMux()
+	root.Handle("GET /healthz", handleHealthz(pool))
+	root.Handle("GET /static/", web.Static())
+	root.Handle("/", pageHandler)
+
+	// The outer middleware applies to every response, static assets and
+	// error pages included.
+	var handler http.Handler = root
+	handler = http.MaxBytesHandler(handler, maxRequestBytes)
+	handler = web.SecureHeaders(handler)
 	handler = web.RecoverPanics(logger, handler)
 	handler = web.LogRequests(logger, handler)
 	return handler

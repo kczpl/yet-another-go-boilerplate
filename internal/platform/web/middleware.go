@@ -54,6 +54,22 @@ func LogRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	})
 }
 
+// SecureHeaders sets the security response headers on every response. The
+// CSP permits only same-origin content plus data: images (the favicon);
+// htmx and the stylesheet come from /static, so 'self' covers them. Widen
+// a directive only with a comment that says why.
+func SecureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; img-src 'self' data:; frame-ancestors 'none'; form-action 'self'; base-uri 'self'")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "same-origin")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // RecoverPanics turns a handler panic into a 500 and a log line, not a
 // dropped connection.
 func RecoverPanics(logger *slog.Logger, next http.Handler) http.Handler {

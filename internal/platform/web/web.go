@@ -65,7 +65,13 @@ func IsHTMX(r *http.Request) bool {
 	return r.Header.Get("HX-Request") == "true"
 }
 
-// Static serves the embedded /static/* assets (htmx, stylesheet).
+// Static serves the embedded /static/* assets (htmx, stylesheet). The
+// assets live inside the binary, so a deploy replaces them; one hour of
+// browser cache is safe.
 func Static() http.Handler {
-	return http.FileServerFS(staticFS)
+	files := http.FileServerFS(staticFS)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		files.ServeHTTP(w, r)
+	})
 }
