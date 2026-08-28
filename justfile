@@ -35,6 +35,10 @@ ci: lint test
 migrate:
   go run ./cmd/api migrate
 
+# Create an account: just adduser ada@example.com 'Ada Lovelace'
+adduser email name:
+  go run ./cmd/api adduser {{ email }} '{{ name }}'
+
 # Create a new migration: just makemigration create_users_table
 makemigration name:
   #!/usr/bin/env bash

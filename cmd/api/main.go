@@ -5,6 +5,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,10 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/kczpl/yet-another-go-boilerplate/internal/app"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/config"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/database"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/logging"
+	"github.com/kczpl/yet-another-go-boilerplate/internal/user"
 	"github.com/kczpl/yet-another-go-boilerplate/migrations"
 )
 
@@ -47,10 +53,18 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 	if err := database.Migrate(ctx, pool, migrations.FS); err != nil {
 		return fmt.Errorf("running migrations: %w", err)
 	}
-	// `go run ./cmd/api migrate` applies the migrations and exits.
-	if len(args) > 1 && args[1] == "migrate" {
-		logger.Info("migrations applied")
-		return nil
+	// A subcommand runs after the migrations and exits. Without a
+	// subcommand, run starts the server.
+	if len(args) > 1 {
+		switch args[1] {
+		case "migrate":
+			logger.Info("migrations applied")
+			return nil
+		case "adduser":
+			return addUser(ctx, pool, args[2:], stdout)
+		default:
+			return fmt.Errorf("unknown command %q (expected migrate or adduser)", args[1])
+		}
 	}
 
 	srv := &http.Server{
@@ -79,4 +93,34 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 		logger.Info("server stopped")
 		return nil
 	}
+}
+
+// addUser creates an account and prints a random temporary password once.
+// There is no register page — this command is the way to create accounts.
+// It never accepts a password argument: argv leaks into the shell history
+// and the process list.
+func addUser(ctx context.Context, pool *pgxpool.Pool, args []string, stdout io.Writer) error {
+	if len(args) != 2 {
+		return errors.New("usage: api adduser <email> <name>")
+	}
+	email, name := args[0], args[1]
+
+	// 18 random bytes encode to 24 base64url characters.
+	raw := make([]byte, 18)
+	if _, err := rand.Read(raw); err != nil {
+		return fmt.Errorf("generating password: %w", err)
+	}
+	password := base64.RawURLEncoding.EncodeToString(raw)
+
+	users := user.NewService(user.NewRepo(pool))
+	u, err := users.Register(ctx, email, name, password)
+	if err != nil {
+		return fmt.Errorf("creating user: %w", err)
+	}
+
+	fmt.Fprintf(stdout, "user created\n")
+	fmt.Fprintf(stdout, "  id:    %s\n", u.ID)
+	fmt.Fprintf(stdout, "  email: %s\n", u.Email)
+	fmt.Fprintf(stdout, "  temporary password (shown once): %s\n", password)
+	return nil
 }
