@@ -53,3 +53,33 @@ func TestValidateRejectsUnknownEnvironment(t *testing.T) {
 		t.Fatalf("Validate = %v, want an ENVIRONMENT error for a typo'd env", err)
 	}
 }
+
+func TestLogLevel(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"empty means info", "", false},
+		{"debug", "debug", false},
+		{"uppercase warn", "WARN", false},
+		{"typo fails validation", "debgu", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := config.Load(getenvFrom(map[string]string{"LOG_LEVEL": tt.value}))
+			err := cfg.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "LOG_LEVEL") {
+					t.Fatalf("Validate = %v, want a LOG_LEVEL error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate: %v, want nil", err)
+			}
+		})
+	}
+}
