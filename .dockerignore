@@ -1,6 +1,7 @@
 .git
 .env
 .claude
+bin
 *.md
 docker-compose.yml
 Dockerfile

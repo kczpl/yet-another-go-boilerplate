@@ -1,0 +1,13 @@
+{{/* The shared error page. RespondError renders it for every non-JSON
+     client. */}}
+{{define "content"}}
+<div class="narrow">
+  <header class="page-head">
+    <h1>{{.Status}} · {{.StatusText}}</h1>
+  </header>
+  <section class="card">
+    <p>{{.Msg}}</p>
+    <p class="muted"><a href="/">← Back to the start</a></p>
+  </section>
+</div>
+{{end}}

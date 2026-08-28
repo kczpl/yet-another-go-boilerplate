@@ -1,0 +1,47 @@
+{{define "content"}}
+<header class="page-head">
+  <h1>Welcome back, {{.User.Name}}</h1>
+</header>
+
+<div class="dashboard">
+  {{template "profile-section" .}}
+
+  {{/* The note feature owns this section. The dashboard embeds it over
+       HTTP (hx-get on load), never through a Go import. Without JavaScript,
+       the placeholder link leads to the full page. */}}
+  <section id="notes-section" class="card"
+           hx-get="/notes" hx-trigger="load" hx-swap="outerHTML">
+    <h2>My notes</h2>
+    <p class="muted"><a href="/notes">Open your notes →</a></p>
+  </section>
+</div>
+{{end}}
+
+{{/* This is the single htmx swap target. POST /me re-renders this whole
+     section, both on success and on validation errors. */}}
+{{define "profile-section"}}
+<section id="profile-section" class="card">
+  <h2>Profile</h2>
+  {{if .Saved}}<p class="notice success">Profile saved.</p>{{end}}
+  {{with .Error}}<p class="notice error">{{.}}</p>{{end}}
+
+  <dl>
+    <dt>Email</dt><dd>{{.User.Email}}</dd>
+    <dt>Name</dt><dd>{{.User.Name}}</dd>
+    <dt>Member since</dt><dd>{{.User.CreatedAt.Format "2 Jan 2006"}}</dd>
+  </dl>
+
+  <form method="post" action="/me"
+        hx-post="/me" hx-target="#profile-section" hx-swap="outerHTML">
+    <div class="field">
+      <label for="name">Name</label>
+      <input type="text" id="name" name="name" value="{{.Form.Name}}" required>
+    </div>
+    <div class="field">
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" value="{{.Form.Email}}" required>
+    </div>
+    <button type="submit">Save changes</button>
+  </form>
+</section>
+{{end}}

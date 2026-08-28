@@ -7,39 +7,43 @@ default:
 compose:
   docker compose up
 
-# Run the API on the host (needs: docker compose up postgres -d)
+# Run the API on the host (start postgres first: docker compose up postgres -d)
 app:
-  go run .
+  go run ./cmd/api
 
-# Format code
+# Build the production binary into bin/api
+build:
+  CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/api ./cmd/api
+
+# Format the code
 fmt:
   gofmt -l -w .
 
-# Vet + verify formatting
+# Run go vet and check the format
 lint:
   go vet ./...
   @unformatted="$(gofmt -l .)"; if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
 
-# Run tests against the real test database
+# Run the tests against the real test database
 test *flags="":
   docker compose up -d --wait postgres-test
   go test ./... {{ flags }}
 
 ci: lint test
 
-# Apply migrations (they also run automatically on app startup)
+# Apply the migrations (they also run automatically on app startup)
 migrate:
-  go run . migrate
+  go run ./cmd/api migrate
 
 # Create a new migration: just makemigration create_users_table
 makemigration name:
   #!/usr/bin/env bash
   set -euo pipefail
-  next=$(printf "%05d" $(( $(ls postgres/migrations/*.sql 2>/dev/null | wc -l) + 1 )))
-  file="postgres/migrations/${next}_{{ name }}.sql"
-  printf -- '-- +goose Up\n\n-- +goose Down\n' > "$file"
+  next=$(printf "%04d" $(( $(ls migrations/*.sql 2>/dev/null | wc -l) + 1 )))
+  file="migrations/${next}_{{ name }}.sql"
+  printf -- '-- Write forward-only SQL. Migrations are append-only.\n-- Never edit an applied file. Add a new file instead.\n\n' > "$file"
   echo "created $file"
 
-# Check dependencies for known vulnerabilities
+# Check the dependencies for known vulnerabilities
 vulncheck:
   go run golang.org/x/vuln/cmd/govulncheck@latest ./...

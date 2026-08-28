@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Let htmx swap 422 responses, so forms re-render with validation errors. -->
+  <meta name="htmx-config" content='{"responseHandling":[{"code":"204","swap":false},{"code":"[23]..","swap":true},{"code":"422","swap":true},{"code":"[45]..","swap":false,"error":true}]}'>
+  <title>{{.Title}} · notebook</title>
+  <link rel="icon" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" fill="black"/><rect x="30" y="30" width="40" height="40" fill="white"/></svg>'>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <nav>
+    <a href="/" class="brand">notebook</a>
+    <span class="spacer"></span>
+    {{if .LoggedIn}}
+      <form method="post" action="/logout">
+        <button type="submit" class="link">Log out</button>
+      </form>
+    {{else}}
+      <a href="/login">Log in</a>
+    {{end}}
+  </nav>
+  <main>
+    {{block "content" .}}{{end}}
+  </main>
+</body>
+</html>

@@ -1,7 +1,7 @@
 ---
 paths:
   - "**/*_test.go"
-  - "testdb/**/*.go"
+  - "internal/testdb/**/*.go"
 ---
 
 # Testing Rules
@@ -19,32 +19,36 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   fine; there is no shared state and no rollback trickery.
 - `t.Parallel()` is safe and encouraged — databases are independent.
 - Requires the compose service: `docker compose up postgres-test -d`
-  (`just test` does this for you). If it's down, tests fail with instructions.
+  (`just test` does this for you). If it's down, tests fail with
+  instructions. `POSTGRES_TEST_PORT` overrides the port (default 5433).
 - Schema changes are picked up automatically: the template name includes a
   hash of the embedded migrations.
 
 ## What to Test Where
 
-- `api/*_test.go` — behavior through the **full server**: build it with
-  `api.NewServer` exactly as `main` does (middleware + auth + routes), execute
-  with `httptest.NewRecorder`. Covers status codes, envelopes, validation
-  problems, auth (401), and 404s.
-- `domains/<name>/service_test.go` — business logic + SQL against a real database
-  (service tests exercise the repo; don't duplicate them with repo-only tests
-  unless a query has behavior the service doesn't reach).
-- `auth/` — pure middleware unit tests with `httptest`, no database.
+- `internal/app/app_test.go` — user-visible flows through the **full
+  handler**: build it with `app.New` exactly as `cmd/api` does (middleware +
+  sessions + CSRF + routes), drive it with `httptest`, assert on status
+  codes, redirects, and rendered HTML. Test both paths: htmx (fragment) and
+  plain form (redirect / full page).
+- `internal/<feature>/service_test.go` — business logic + SQL against a real
+  database. Service tests exercise the repo; don't duplicate them with
+  repo-only tests unless a query has behavior the service doesn't reach.
+- Pure helpers (e.g. password hashing) get white-box tests in the same
+  package when the functions are deliberately unexported.
 
 ## Conventions
 
 - Table-driven tests with `t.Run` for input variations; separate test
   functions for distinct behaviors. Name as `Test<Thing><Behavior>`.
-- Use external test packages (`package api_test`) — test through the public
-  API.
+- Use external test packages (`package note_test`) — test through the public
+  API. White-box tests are the documented exception above.
 - Helpers take `t *testing.T`, call `t.Helper()`, and fail with `t.Fatalf`.
+- Seed rows from other features with raw SQL helpers (see `seedUser` in
+  `internal/note/service_test.go`) — feature tests must not import other
+  feature packages.
 - Use `t.Context()` instead of `context.Background()` inside tests, and
   `t.Cleanup` instead of manual teardown.
-- Compare structs with `github.com/google/go-cmp/cmp.Diff`, not
-  `reflect.DeepEqual`.
 - Never `time.Sleep` to wait for anything; synchronize explicitly.
 - Test files sit next to the code they test — there is no separate `tests/`
   tree.

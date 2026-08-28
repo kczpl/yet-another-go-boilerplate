@@ -1,0 +1,44 @@
+{{define "content"}}
+<div class="narrow">
+  <header class="page-head">
+    <h1>My notes</h1>
+    <p class="muted"><a href="/me">← Back to your profile</a></p>
+  </header>
+  {{template "notes-section" .}}
+</div>
+{{end}}
+
+{{/* This is the single htmx swap target. Add and delete re-render this
+     whole section, both on success and on validation errors. The /me
+     dashboard embeds it with hx-get="/notes". */}}
+{{define "notes-section"}}
+<section id="notes-section" class="card">
+  <h2>My notes</h2>
+  {{with .Error}}<p class="notice error">{{.}}</p>{{end}}
+
+  {{if .Notes}}
+  <ul class="notes">
+    {{range .Notes}}
+    <li>
+      <p class="note-text">{{.Text}}</p>
+      <button type="button" class="danger"
+              hx-delete="/notes/{{.ID}}"
+              hx-target="#notes-section" hx-swap="outerHTML"
+              hx-confirm="Remove this note?">Remove</button>
+    </li>
+    {{end}}
+  </ul>
+  {{else}}
+  <p class="empty muted">No notes yet.</p>
+  {{end}}
+
+  <form class="note-form" method="post" action="/notes"
+        hx-post="/notes" hx-target="#notes-section" hx-swap="outerHTML">
+    <div class="field">
+      <label for="note-text">Text</label>
+      <textarea id="note-text" name="text" rows="3" required placeholder="Write a note">{{.Form.Text}}</textarea>
+    </div>
+    <button type="submit">Add note</button>
+  </form>
+</section>
+{{end}}

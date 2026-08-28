@@ -8,7 +8,6 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       DATABASE_URL: postgres://app:app@postgres:5432/app
-      API_KEY: ${API_KEY:-dev-secret-key}
     depends_on:
       postgres:
         condition: service_healthy
@@ -29,7 +28,7 @@ services:
       timeout: 3s
       retries: 30
 
-  # Ephemeral database for `just test` — no volume, wiped on restart.
+  # Ephemeral database for `just test`. It has no volume. A restart wipes it.
   postgres-test:
     image: postgres:18
     environment:
