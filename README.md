@@ -7,6 +7,7 @@
   <img alt="pgx" src="https://img.shields.io/badge/pgx-v5-336791?logo=postgresql&logoColor=white">
   <img alt="htmx" src="https://img.shields.io/badge/htmx-2-3366CC?logoColor=white">
   <img alt="just" src="https://img.shields.io/badge/just-tasks-DE5FE9?logo=just&logoColor=white">
+  <img alt="CI" src="https://github.com/kczpl/yet-another-go-boilerplate/actions/workflows/ci.yml/badge.svg">
 </p>
 
 Minimal, feature-based Go web service template. Stdlib `net/http` (Go 1.22+
@@ -26,8 +27,8 @@ Built on two references:
 ## Layout
 
 ```
-cmd/api/            main: config → pool → migrate → app.New → server; graceful shutdown
-migrations/         embedded SQL migrations, applied on startup (append-only)
+cmd/api/            main: config → pool → migrate → app.New → server; subcommands: migrate, adduser
+migrations/         embedded SQL migrations, timestamp-named, applied on startup (append-only)
 internal/
   platform/         shared infrastructure — features import it, it imports no feature
     config/         env-driven configuration
@@ -67,9 +68,13 @@ just compose                 # full stack in Docker; or:
 docker compose up postgres -d && just app   # app on the host
 ```
 
-There is no register page. Create accounts with `user.Service.Register`
-from code you control — a seed script or your own admin command. Then log
-in at <http://localhost:8080> and add some notes.
+```bash
+just adduser bob@example.com "Bob"   # prints a generated password, once
+```
+
+There is no register page — `just adduser` (a thin CLI wrapper around
+`user.Service.Register`) is how accounts are created. Log in at
+<http://localhost:8080> and add some notes.
 
 ## Routes
 
@@ -80,7 +85,7 @@ in at <http://localhost:8080> and add some notes.
 | POST | `/logout` | – | idempotent |
 | GET/POST | `/me` | session | dashboard: profile + embedded notes section |
 | GET/POST | `/notes` | session | list + add (fragment for htmx, page otherwise) |
-| DELETE | `/notes/{id}` | session | owner-scoped |
+| POST | `/notes/{id}/delete` | session | owner-scoped; plain form, upgraded by htmx |
 | GET | `/static/*` | – | embedded htmx + CSS |
 
 ## Frontend
@@ -89,7 +94,8 @@ in at <http://localhost:8080> and add some notes.
   the binary. There is no npm, no bundler, no build step.
 - Every form is a plain HTML form first; htmx attributes upgrade it. With
   JavaScript disabled, handlers answer with redirects (POST → redirect → GET)
-  and full pages.
+  and full pages. Even delete is a real form (`POST /notes/{id}/delete`) —
+  browser-facing routes use only GET and POST.
 - With htmx, handlers re-render one fragment (`#profile-section`,
   `#notes-section`) and swap it — on success and on 422 validation errors.
 - `/me` is a small dashboard: one screen with the profile card and the note
@@ -111,6 +117,9 @@ in at <http://localhost:8080> and add some notes.
   self-describing format, so the cost can be raised later.
 - CSRF: stdlib `http.CrossOriginProtection` rejects cross-origin unsafe
   requests via `Sec-Fetch-Site` — no tokens needed.
+- Every response carries security headers (a strict CSP — possible because
+  all assets are self-hosted — plus `nosniff`, `X-Frame-Options`,
+  `Referrer-Policy`), and `http.MaxBytesHandler` caps request bodies.
 
 ## Logging
 
@@ -135,23 +144,29 @@ level=DEBUG msg="pgx: Query" sql="INSERT INTO notes ..." time=2.39ms request_id=
 ## Testing
 
 ```bash
-just test        # starts postgres-test (compose) + go test ./...
+just test        # starts postgres-test (compose) + go test -race ./...
 ```
 
 Every test calls `testdb.New(t)` and gets a **private database** cloned from
 a migrated template (`CREATE DATABASE ... TEMPLATE`, a few ms) — full
 isolation, commits allowed, `t.Parallel()` safe, dropped on cleanup. HTTP
 tests drive the complete `app.New` handler (middleware + sessions + CSRF
-included) and assert on rendered HTML.
+included) and assert on rendered HTML; they also pin the security
+behavior — CSRF rejection, response headers, the body cap, the unified 404.
+The race detector is always on.
 
 ## Commands
 
 ```bash
 just app / compose / build / fmt / lint / test / ci
 just migrate                          # apply migrations (startup does this too)
-just makemigration create_toys_table  # new migration file
+just makemigration create_toys_table  # new migration file (timestamp-named)
+just adduser bob@example.com "Bob"    # create an account, prints the password
 just vulncheck                        # govulncheck
 ```
+
+CI (`.github/workflows/ci.yml`) runs `just ci` and `govulncheck` on every
+push and pull request — the same recipes you run locally, nothing more.
 
 ## Working with AI agents
 
@@ -161,6 +176,10 @@ give coding agents the project conventions up front. The codebase is
 deliberately explicit and denormalized — every query written out, every
 dependency injected by hand — so agents (and humans) can read any file in
 isolation.
+
+The rules in `.claude/rules/` are the canonical convention reference —
+this README and `CLAUDE.md` only summarize them. `AGENTS.md` is a symlink
+to `CLAUDE.md` for tools that look for that name.
 
 ## Renaming
 
