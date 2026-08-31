@@ -16,8 +16,8 @@ No frameworks, no ORM, no DI container — explicit wiring in `internal/app`.
 - Handlers return errors: `web.HandlerE` wrapped by `web.E(logger, h)`;
   `web.RespondError` logs once and answers (error page, or JSON envelope
   for `Accept: application/json`)
-- Migrations: embedded SQL in `migrations/`, timestamp-named, applied on
-  startup (append-only)
+- Migrations: embedded SQL in `migrations/`, applied on startup
+  (append-only; new files are timestamp-named)
 - Logging: `log/slog` via `logging.New` (text in development, JSON otherwise);
   `*Context` methods pick up `request_id`/`user_id` from the request context;
   `LOG_LEVEL=debug` also logs SQL

@@ -15,7 +15,7 @@ Go; these rules pin down how this template applies it. The files in
 
 ```
 cmd/api/            main + run(); subcommands migrate, adduser; no business logic
-migrations/         embedded SQL, append-only, timestamp-prefixed
+migrations/         embedded SQL, append-only; new files are timestamp-prefixed
 internal/platform/  shared infrastructure: config, database, logging, web
 internal/app/       composition — the only place that wires features
 internal/auth/      sessions; knows users only as id strings

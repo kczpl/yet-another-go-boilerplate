@@ -28,7 +28,7 @@ Built on two references:
 
 ```
 cmd/api/            main: config → pool → migrate → app.New → server; subcommands: migrate, adduser
-migrations/         embedded SQL migrations, timestamp-named, applied on startup (append-only)
+migrations/         embedded SQL migrations, applied on startup (append-only; new files are timestamp-named)
 internal/
   platform/         shared infrastructure — features import it, it imports no feature
     config/         env-driven configuration
@@ -80,6 +80,7 @@ There is no register page — `just adduser` (a thin CLI wrapper around
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
+| GET | `/` | – | redirects to `/me`, or to `/login` when logged out |
 | GET | `/healthz` | – | liveness + DB ping |
 | GET/POST | `/login` | – | redirects to `/me` when logged in |
 | POST | `/logout` | – | idempotent |
