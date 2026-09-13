@@ -1,7 +1,7 @@
 ---
 paths:
-  - "internal/**/postgres.go"
-  - "internal/**/repository.go"
+  - "internal/**/postgres*.go"
+  - "internal/**/repository*.go"
   - "internal/platform/database/**/*.go"
   - "migrations/*"
 ---
@@ -31,14 +31,16 @@ paths:
   `<name>Columns` const so every query selects the same columns.
 - The `Query → Collect` pattern ignores the Query error on purpose
   (`rows, _ :=`) — Collect surfaces it.
-- Writes use `RETURNING` and return the fresh row; every `UPDATE` sets
+- Writes use `RETURNING` when the caller needs the fresh row. Deletes and
+  session inserts may return only an error. Every `UPDATE` sets
   `updated_at = now()`.
 - Enforce ownership in SQL (`WHERE id = @id AND user_id = @user_id`), not in
   Go — zero rows affected means the feature's not-found sentinel.
 
 ## Queries at Scale
 
-- **Every list query has a `LIMIT`.** The canonical example is `listLimit`
+- **Every feature list query has a `LIMIT`.** Migration and test database
+  catalogs are finite infrastructure metadata and are exempt. The canonical example is `listLimit`
   in `internal/note/postgres.go`. An unbounded list works in the demo and
   becomes an incident at scale.
 - When one page is not enough, paginate by keyset, never by `OFFSET`:
@@ -57,16 +59,20 @@ paths:
 
 ## Transactions
 
-- **A transaction never crosses a repository method boundary.** An
+- **By default, a transaction stays inside one repository method.** An
   operation that needs several statements atomically is ONE repo method,
   and that method wraps the statements in `pgx.BeginFunc` (pattern:
   `internal/platform/database/migrate.go`).
-- Services stay transaction-free: a service calls one repo method and sees
-  one result. Never pass `pgx.Tx` through a service, an interface, or a
-  package boundary.
-- A transaction never spans two features. If you think you need one, the
-  package boundary is wrong — merge the features or redesign the operation
-  (see core.md).
+- Services do not manage database transactions. A service may call several
+  repository methods to carry out a use case. Separate calls are not atomic.
+  When writes must succeed together, expose one repository operation that
+  owns the transaction. Do not expose `pgx.Tx` through service or feature
+  repository interfaces.
+- If a use case needs atomic writes across features, first document its
+  transaction owner and a narrow coordination interface. Do not pass
+  `pgx.Tx` through services. Do not merge unrelated features solely because
+  they need one atomic operation. The template does not add a generic unit
+  of work for a hypothetical future use case.
 
 ## IDs
 
@@ -81,8 +87,9 @@ paths:
   lexical filename order, each file in one transaction, under an advisory
   lock (`internal/platform/database/migrate.go`).
 - Create files only with `just makemigration <name>` — it prefixes a UTC
-  timestamp (`20260828143000_add_toys.sql`), so parallel branches cannot
-  collide on a sequence number. The migrator applies every file that is
+  timestamp (`20260828143000_add_toys.sql`) plus a descriptive name to reduce
+  collisions across branches. The generator refuses to overwrite a file;
+  identical names created in the same second can still collide. The migrator applies every file that is
   not yet recorded, so a file merged late still runs.
 - **Append-only**: never edit or rename an applied migration; add a new
   file. Roll forward with a new migration — there are no down migrations.
@@ -93,5 +100,8 @@ paths:
   case-insensitive uniqueness via `UNIQUE INDEX ... (lower(email))`;
   `ON DELETE CASCADE` for owned rows; index foreign keys, matching the
   list query's `ORDER BY` when possible.
+- The migrator records filenames, not per-file checksums. Code review must
+  enforce the append-only rule. `migrations.Hash` invalidates test templates;
+  it does not detect edits in a deployed database.
 - Mirror any value `CHECK` in Go (see `maxTextLength` in
   `internal/note/service.go`) and keep the two in sync.

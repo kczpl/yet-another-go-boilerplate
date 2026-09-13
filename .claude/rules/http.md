@@ -1,6 +1,6 @@
 ---
 paths:
-  - "internal/**/http.go"
+  - "internal/**/http*.go"
   - "internal/auth/**/*.go"
   - "internal/app/**/*.go"
   - "internal/platform/web/**"
@@ -31,7 +31,8 @@ adapted to server-rendered HTML + htmx and to error-returning handlers.
   `POST /notes/{id}/delete` with a real `<form>`; htmx upgrades the same
   URL with `hx-post`. Never register a browser-facing DELETE/PUT/PATCH.
 - A feature owns the URL prefix that matches its package name
-  (`note` → `/notes`). Only `app.New` registers cross-feature paths:
+  (`note` → `/notes`). The account feature owns `/`, `/login`, and `/me`;
+  auth owns `/logout`. `app.New` registers infrastructure paths:
   `/healthz`, `/static/`, and the `"/"` catch-all that turns every
   unmatched request into the unified 404. The catch-all sits behind the
   CSRF guard, so a cross-origin POST to an unknown path gets 403, not
@@ -39,15 +40,18 @@ adapted to server-rendered HTML + htmx and to error-returning handlers.
 - The middleware chain lives only in `app.New`. Keep this order (outermost
   first): `LogRequests` → `RecoverPanics` → `SecureHeaders` →
   `MaxBytesHandler` → outer mux (`/healthz`, `/static/`) →
-  `CrossOriginProtection` → `LoadIdentity` → pages mux.
-- `/healthz` and `/static/` sit outside sessions and CSRF on purpose: an
-  asset or probe request must not cost a database query. `web.Static()`
-  sets `Cache-Control` — assets are embedded in the binary, so a deploy is
-  the cache invalidation.
-- `LogRequests` seeds the request id into the response header, the request
-  context, and the log context (`logging.WithAttrs`); `LoadIdentity` adds
-  `user_id` for logged-in requests. Every deeper `*Context` log call —
-  handlers, RespondError, pgx queries — repeats both automatically.
+  `PageHeaders` → `CrossOriginProtection` → `LoadIdentity` → pages mux.
+- `/healthz` and `/static/` sit outside sessions and CSRF. Neither route
+  queries sessions. `/healthz` still pings PostgreSQL to check availability;
+  static assets do not use the database. `web.Static()`
+  sets `Cache-Control: public, no-cache` because asset URLs have no version.
+  A deploy does not clear a browser cache. PageHeaders sets `no-store` and
+  `Vary: HX-Request, Accept` on dynamic responses, including auth redirects.
+- `LogRequests` puts the request id in the response header and adds it to
+  the request's log attributes with `logging.WithAttrs`. `LoadIdentity`
+  adds `user_id` to the context passed to authenticated handlers. Log calls
+  with that context include both attributes. The outer access log has the
+  request id; it does not receive the inner user context.
 
 ## Handlers
 
@@ -102,9 +106,8 @@ Progressive enhancement — every flow must work without JavaScript:
 - Handlers return errors. `web.E(logger, h)` adapts a `web.HandlerE` to
   `http.Handler` and routes errors through `web.RespondError` — the only
   place that writes an error response.
-- Expected terminal states: return `web.BadRequest` / `web.Unauthorized` /
-  `web.NotFound` (or a `*web.HTTPError` literal). Only `Msg` reaches the
-  client; put the internal cause in `Err` — it goes only to the log.
+- Expected terminal states: return `web.BadRequest` / `web.NotFound`
+  (or a `*web.HTTPError` literal). Only `Msg` reaches the client; put the internal cause in `Err` — it goes only to the log.
 - Unexpected errors: `return err`. RespondError logs it once (with
   `request_id`/`user_id` from the context) and answers an opaque 500.
   Never leak internals to clients; never log and return the same error.
@@ -131,7 +134,10 @@ Progressive enhancement — every flow must work without JavaScript:
   `<form>` element. The plain attributes are the no-JS path — never omit
   them. Mutating buttons live inside a `<form>`, never as bare
   `hx-*`-only buttons.
-- The htmx-config meta in `layout.html` enables swapping on 422 — keep it.
+- The htmx-config meta enables swaps on 422. It disables eval, script tags,
+  inline indicator styles, and local history storage. Keep these settings
+  compatible with the CSP. `static/app.js` shows terminal request failures
+  in the shared alert without discarding submitted form values.
 - Static assets are embedded in `internal/platform/web/static/` and served
   at `/static/`. htmx is vendored there; never add a CDN script tag, an
   inline `<script>`, or an inline `style=` attribute — the CSP forbids
@@ -144,6 +150,8 @@ Progressive enhancement — every flow must work without JavaScript:
 - `RequireIdentity` answers 303 → `/login` for browsers and
   401 + `HX-Redirect: /login` for htmx requests. At registration it wraps
   outside the error adapter: `auth.RequireIdentity(web.E(logger, h))`.
+- A database error in LoadIdentity returns the unified 500 and preserves
+  the cookie. Only ErrNoSession means anonymous access.
 - Session cookie: `session_id`, HttpOnly, SameSite=Lax, Secure outside
   development. The DB stores only the SHA-256 hash of the token.
 - CSRF is `http.CrossOriginProtection` (stdlib) in the middleware chain —
@@ -157,7 +165,8 @@ Progressive enhancement — every flow must work without JavaScript:
 
 - `main` stays trivial; `run(ctx, args, getenv, stdout)` owns startup and
   takes its environment as arguments so tests can call it.
-- Subcommands: `migrate` applies migrations and exits; `adduser <email>
+- Validate command names and argument counts before any database work.
+  Subcommands: `migrate` applies migrations and exits; `adduser <email>
   <name>` creates an account with a generated password and prints it once
   to stdout. An unknown subcommand is an error — never fall through to
   serving.
@@ -166,3 +175,16 @@ Progressive enhancement — every flow must work without JavaScript:
   fresh 10s context.
 - Migrations run on startup (idempotent) under an advisory lock, so
   parallel replicas can boot safely.
+
+## Explicit Exceptions
+
+- Note deletion is idempotent in the UI. Missing, malformed, and foreign
+  IDs all cause the same successful refresh. The service still returns
+  ErrNotFound; SQL still enforces ownership.
+- Login uses a plain form and a full 401 page. Profile and note forms use
+  htmx. Do not treat the terminal error page as a fragment for a form.
+- CSRF rejections use the stdlib 403 response. Health checks and missing
+  static assets also use stdlib responses. The unified error contract
+  applies to feature handlers and recoverable panics before a response.
+- auth.Service includes the cookie adapter. It is specific to browser
+  sessions; feature business services remain independent of HTTP.

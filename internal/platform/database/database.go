@@ -19,9 +19,11 @@ func Connect(ctx context.Context, url string, logger *slog.Logger) (*pgxpool.Poo
 	if err != nil {
 		return nil, fmt.Errorf("parsing database url: %w", err)
 	}
-	cfg.ConnConfig.Tracer = &tracelog.TraceLog{
-		Logger:   queryLogger(logger),
-		LogLevel: tracelog.LogLevelTrace,
+	if logger.Enabled(ctx, slog.LevelDebug) {
+		cfg.ConnConfig.Tracer = &tracelog.TraceLog{
+			Logger:   queryLogger(logger),
+			LogLevel: tracelog.LogLevelTrace,
+		}
 	}
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
@@ -42,24 +44,15 @@ func Connect(ctx context.Context, url string, logger *slog.Logger) (*pgxpool.Poo
 // queryLogger adapts pgx tracelog to slog. The request context passes
 // through, so query logs carry request_id and user_id.
 func queryLogger(logger *slog.Logger) tracelog.LoggerFunc {
-	return func(ctx context.Context, level tracelog.LogLevel, msg string, data map[string]any) {
+	return func(ctx context.Context, _ tracelog.LogLevel, msg string, data map[string]any) {
 		attrs := make([]slog.Attr, 0, len(data))
 		for k, v := range data {
+			// Arguments and driver errors can contain private data.
+			if k == "args" || k == "err" {
+				continue
+			}
 			attrs = append(attrs, slog.Any(k, v))
 		}
-		logger.LogAttrs(ctx, slogLevel(level), "pgx: "+msg, attrs...)
-	}
-}
-
-// slogLevel downshifts pgx levels. pgx logs every query at Info, which
-// floods production logs. Everything below Warn becomes Debug.
-func slogLevel(level tracelog.LogLevel) slog.Level {
-	switch level {
-	case tracelog.LogLevelError:
-		return slog.LevelError
-	case tracelog.LogLevelWarn:
-		return slog.LevelWarn
-	default:
-		return slog.LevelDebug
+		logger.LogAttrs(ctx, slog.LevelDebug, "pgx: "+msg, attrs...)
 	}
 }

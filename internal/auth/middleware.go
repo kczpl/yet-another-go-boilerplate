@@ -27,9 +27,8 @@ func (s *Service) LoadIdentity(logger *slog.Logger, next http.Handler) http.Hand
 				http.SetCookie(w, s.cookie("", -1))
 			}
 		default:
-			// An infrastructure failure must not take every page down.
-			// Log it and continue as anonymous.
-			logger.ErrorContext(r.Context(), "loading identity", "error", err)
+			web.RespondError(logger, w, r, err)
+			return
 		}
 		next.ServeHTTP(w, r)
 	})

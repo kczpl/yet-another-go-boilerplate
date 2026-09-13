@@ -22,7 +22,8 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   (`just test` does this for you). If it's down, tests fail with
   instructions. `POSTGRES_TEST_PORT` overrides the port (default 5433).
 - Schema changes are picked up automatically: the template name includes a
-  hash of the embedded migrations.
+  hash of the embedded migrations. Setup and cleanup have finite deadlines.
+  The postgres-test service uses the test profile and tmpfs.
 
 ## The Race Detector
 
@@ -58,15 +59,20 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
 - Seed rows from other features with raw SQL helpers (see `seedUser` in
   `internal/note/service_test.go`) — feature tests must not import other
   feature packages.
-- Use `t.Context()` instead of `context.Background()` inside tests, and
-  `t.Cleanup` instead of manual teardown.
+- Use `t.Context()` for test operations and `t.Cleanup` for cleanup.
+  The test context is canceled before cleanup starts. Cleanup that uses
+  the database must use a fresh context with a finite deadline.
 - Never `time.Sleep` to wait for anything; synchronize explicitly.
 - Test files sit next to the code they test — there is no separate `tests/`
   tree.
 
 ## CI
 
-- `.github/workflows/ci.yml` runs `just ci` (lint + test, with the
-  `postgres-test` compose service) plus `govulncheck` on every push and
-  pull request. Keep `just ci` green locally before you push — CI runs
-  the same recipes, nothing more.
+- `.github/workflows/ci.yml` runs `just ci` (lint, types, complexity, tests,
+  and vulncheck) on main pushes and pull requests, then builds the Docker
+  image. `just test` passes extra arguments safely and disables result
+  caching so database tests run on every invocation.
+- Keep migration tests for rollback, parallel calls, late files, and
+  cancellation. Keep HTTP tests for database failures and htmx cache headers.
+- Browser verification complements httptest. HTTP tests cannot detect CSP
+  violations or a broken DOM swap. Use a browser when the htmx flow changes.

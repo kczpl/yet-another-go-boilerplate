@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -40,21 +41,24 @@ const advisoryLockID = 987_654_321
 // Only this test owns the database.
 func New(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	base := baseURL()
 
 	conn, err := pgx.Connect(ctx, base)
 	if err != nil {
 		t.Fatalf("connecting to test postgres: %v\n\nstart it with: docker compose up postgres-test -d", err)
 	}
-	defer conn.Close(ctx)
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Close(closeCtx)
+	}()
 
 	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockID); err != nil {
 		t.Fatalf("acquiring advisory lock: %v", err)
 	}
-	defer func() {
-		_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, advisoryLockID)
-	}()
+	// The dedicated connection releases its lock when it closes.
 
 	template, err := ensureTemplate(ctx, conn, base)
 	if err != nil {
@@ -62,7 +66,7 @@ func New(t *testing.T) *pgxpool.Pool {
 	}
 
 	name := "test_" + randomSuffix()
-	if _, err := conn.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %q TEMPLATE %q`, name, template)); err != nil {
+	if _, err := conn.Exec(ctx, `CREATE DATABASE `+pgx.Identifier{name}.Sanitize()+` TEMPLATE `+pgx.Identifier{template}.Sanitize()); err != nil {
 		t.Fatalf("creating test database: %v", err)
 	}
 
@@ -73,14 +77,15 @@ func New(t *testing.T) *pgxpool.Pool {
 
 	t.Cleanup(func() {
 		pool.Close()
-		dropCtx := context.Background()
+		dropCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		conn, err := pgx.Connect(dropCtx, base)
 		if err != nil {
 			t.Logf("dropping test database %s: %v", name, err)
 			return
 		}
 		defer conn.Close(dropCtx)
-		if _, err := conn.Exec(dropCtx, fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, name)); err != nil {
+		if _, err := conn.Exec(dropCtx, `DROP DATABASE IF EXISTS `+pgx.Identifier{name}.Sanitize()+` WITH (FORCE)`); err != nil {
 			t.Logf("dropping test database %s: %v", name, err)
 		}
 	})
@@ -107,7 +112,7 @@ func ensureTemplate(ctx context.Context, conn *pgx.Conn, base string) (string, e
 		return "", err
 	}
 
-	if _, err := conn.Exec(ctx, fmt.Sprintf(`CREATE DATABASE %q`, name)); err != nil {
+	if _, err := conn.Exec(ctx, `CREATE DATABASE `+pgx.Identifier{name}.Sanitize()); err != nil {
 		return "", fmt.Errorf("creating template: %w", err)
 	}
 
@@ -121,7 +126,7 @@ func ensureTemplate(ctx context.Context, conn *pgx.Conn, base string) (string, e
 	pool.Close()
 	if err != nil {
 		// Do not leave a half-migrated template behind for the next run.
-		_, _ = conn.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %q`, name))
+		_, _ = conn.Exec(ctx, `DROP DATABASE IF EXISTS `+pgx.Identifier{name}.Sanitize())
 		return "", fmt.Errorf("migrating template: %w", err)
 	}
 	return name, nil
@@ -129,7 +134,7 @@ func ensureTemplate(ctx context.Context, conn *pgx.Conn, base string) (string, e
 
 func dropStaleTemplates(ctx context.Context, conn *pgx.Conn, current string) error {
 	rows, err := conn.Query(ctx,
-		`SELECT datname FROM pg_database WHERE datname LIKE 'app_test_template_%' AND datname <> $1`, current)
+		`SELECT datname FROM pg_database WHERE starts_with(datname, 'app_test_template_') AND datname <> $1`, current)
 	if err != nil {
 		return fmt.Errorf("listing stale templates: %w", err)
 	}
@@ -138,7 +143,7 @@ func dropStaleTemplates(ctx context.Context, conn *pgx.Conn, current string) err
 		return fmt.Errorf("reading stale templates: %w", err)
 	}
 	for _, name := range stale {
-		if _, err := conn.Exec(ctx, fmt.Sprintf(`DROP DATABASE IF EXISTS %q WITH (FORCE)`, name)); err != nil {
+		if _, err := conn.Exec(ctx, `DROP DATABASE IF EXISTS `+pgx.Identifier{name}.Sanitize()+` WITH (FORCE)`); err != nil {
 			return fmt.Errorf("dropping stale template %s: %w", name, err)
 		}
 	}
@@ -168,7 +173,7 @@ func withDatabase(base, dbname string) string {
 }
 
 func randomSuffix() string {
-	b := make([]byte, 4)
+	b := make([]byte, 8)
 	_, _ = rand.Read(b) // crypto/rand.Read never fails
 	return hex.EncodeToString(b)
 }

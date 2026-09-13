@@ -9,5 +9,6 @@ type Repository interface {
 	// Get returns the unexpired session for tokenHash, or ErrNoSession.
 	Get(ctx context.Context, tokenHash string) (Session, error)
 	Delete(ctx context.Context, tokenHash string) error
+	// DeleteExpired removes at most 100 expired sessions.
 	DeleteExpired(ctx context.Context) error
 }

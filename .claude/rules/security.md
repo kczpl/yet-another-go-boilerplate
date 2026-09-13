@@ -34,14 +34,18 @@ purpose.
 
 - Hash with PBKDF2-HMAC-SHA256: 600k iterations (the OWASP minimum),
   16-byte salt, 32-byte key (`internal/user/password.go`). To raise the
-  cost, raise the constant only — the self-describing format
+  cost, raise the cost constant and review the verification ceiling. The format
   (`pbkdf2-sha256$<iterations>$<salt>$<key>`) keeps old hashes valid.
 - Compare hashes only with `hmac.Equal` (constant time).
-- Keep the length limits: minimum 8, maximum 512 characters. The maximum
-  protects the hash function from megabyte inputs (CPU DoS).
-- `Authenticate` burns a full hash on an unknown email and returns one
-  generic `ErrInvalidCredentials` for every failure. Never tell the
-  client which part was wrong. Never remove the timing burn.
+- New passwords require at least 8 Unicode characters and at most 512
+  bytes. Authenticate enforces the byte cap before the DB query or hash.
+  Verification accepts only 16-byte salts, 32-byte keys, and iteration
+  counts from 1 to 1,200,000. Review the ceiling when the cost changes.
+- For a valid email and a password within the byte limit, `Authenticate`
+  burns a full hash when the account does not exist. Invalid credentials
+  return the same `ErrInvalidCredentials`. Infrastructure errors propagate
+  to the error handler. Never reveal which credential was wrong. Keep the
+  timing burn for unknown accounts.
 - There is no register page. `user.Service.Register` is the only way to
   create an account; the sanctioned callers are `cmd/api adduser` and
   code you control. Never expose Register as an open endpoint.
@@ -51,11 +55,15 @@ purpose.
 
 ## Input and Output
 
-- All SQL goes through `pgx.NamedArgs`. Never build SQL from user input —
-  no `fmt.Sprintf`, no string concatenation. (`testdb` is the one
-  exception: test-only code with internally generated names.)
-- Every form handler calls `r.ParseForm()` first and returns
-  `web.BadRequest` on failure — this is also where the body cap surfaces.
+- Bind external values as SQL parameters. Feature repositories use
+  `pgx.NamedArgs`; small fixed queries in platform and testdb may use `$1`.
+  Constant SQL fragments, such as a column list, may be concatenated.
+  Never interpolate user input into SQL. Testdb quotes generated database
+  names and names read from the database catalog with `pgx.Identifier`.
+- Every handler that reads form fields calls `r.ParseForm()` first and
+  returns `web.BadRequest` on failure. This is where the body cap surfaces
+  for form input. Handlers that use only the path need not parse a form.
+- Reject invalid UTF-8 and NUL in text sent to PostgreSQL.
 - Validate and cap all user input in the service layer (lengths, allowed
   values). Database `CHECK` constraints are the backstop, not the first
   line of defense.
@@ -108,8 +116,9 @@ purpose.
 - Only `ValidationError` text, conflict sentinels, and `web.HTTPError.Msg`
   are safe to render to users. Keep internal detail in `HTTPError.Err` —
   it goes only to the log.
-- Never log passwords, raw tokens, or session cookies. The debug SQL log
-  is safe because Go hashes both before they reach SQL.
+- Never log passwords, password hashes, raw tokens, session cookies, or
+  SQL arguments. Hashes remain sensitive. Debug traces omit SQL arguments
+  and driver error payloads. Operational errors are logged at the boundary.
 - Keep secrets out of the repository. `.env` is gitignored;
   configuration comes only from the environment (`config.Load`).
 
@@ -123,7 +132,9 @@ them before you expose the app publicly:
   a cheap CPU denial of service.
 - **TLS in front of the app** (proxy or load balancer) plus HSTS there.
   With TLS in place, rename the cookie to use the `__Host-` prefix.
-- **A session cap per user.** Today every login adds a session row until
-  the 7-day TTL removes it.
+- **A session cap per user.** Every login adds a session row.
+  SQL rejects it after the 7-day TTL. TTL does not remove rows. Each login
+  attempts to remove at most 100 expired rows. Use a scheduled cleanup if
+  the application must remove old sessions without further logins.
 - **Observability beyond logs**: a localhost-only pprof listener,
   metrics, tracing — pick what the deployment needs.

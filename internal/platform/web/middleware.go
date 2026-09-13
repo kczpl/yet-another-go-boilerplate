@@ -1,9 +1,8 @@
 package web
 
 import (
-	"context"
 	"crypto/rand"
-	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
@@ -11,28 +10,18 @@ import (
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/logging"
 )
 
-type contextKey int
-
-const requestIDKey contextKey = 0
-
-// RequestIDFromContext returns the request id that LogRequests set, or "".
-func RequestIDFromContext(ctx context.Context) string {
-	id, _ := ctx.Value(requestIDKey).(string)
-	return id
-}
-
 // LogRequests logs one line per request and propagates X-Request-ID. It
-// reuses an incoming id or generates one, echoes it in the response header,
-// and seeds it as a log attribute, so every deeper log record repeats it.
+// reuses an incoming id of at most 64 bytes or creates one. It echoes the id
+// in the response header and adds it to the log context. Later log records
+// repeat this attribute.
 func LogRequests(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = newRequestID()
+		if requestID == "" || len(requestID) > 64 {
+			requestID = rand.Text()
 		}
 		w.Header().Set("X-Request-ID", requestID)
-		ctx := context.WithValue(r.Context(), requestIDKey, requestID)
-		ctx = logging.WithAttrs(ctx, slog.String("request_id", requestID))
+		ctx := logging.WithAttrs(r.Context(), slog.String("request_id", requestID))
 		r = r.WithContext(ctx)
 
 		// Do not log health checks. They drown out real traffic.
@@ -70,49 +59,77 @@ func SecureHeaders(next http.Handler) http.Handler {
 	})
 }
 
-// RecoverPanics turns a handler panic into a 500 and a log line, not a
-// dropped connection.
+// RecoverPanics returns a unified 500 before the response starts. It
+// aborts the connection if the handler already wrote part of a response.
 func RecoverPanics(logger *slog.Logger, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer func() {
-			if rec := recover(); rec != nil {
-				// http.ErrAbortHandler is the sanctioned abort signal.
-				// Panic again, so the server handles it.
-				if rec == http.ErrAbortHandler { //nolint:errorlint // sentinel comparison per net/http docs
-					panic(rec)
-				}
-				logger.ErrorContext(r.Context(), "panic recovered",
-					"error", rec,
-					"method", r.Method,
-					"path", r.URL.Path,
-				)
-				http.Error(w, "internal server error", http.StatusInternalServerError)
-			}
-		}()
-		next.ServeHTTP(w, r)
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		defer recoverResponse(logger, recorder, r)
+		next.ServeHTTP(recorder, r)
 	})
+}
+
+func recoverResponse(logger *slog.Logger, w *statusRecorder, r *http.Request) {
+	cause := recover()
+	if cause == nil {
+		return
+	}
+	if cause == http.ErrAbortHandler {
+		panic(cause)
+	}
+	if w.wroteHeader {
+		logger.ErrorContext(r.Context(), "panic after response", "error", cause)
+		panic(http.ErrAbortHandler)
+	}
+	RespondError(logger, w, r, fmt.Errorf("handler panic: %v", cause))
 }
 
 // statusRecorder captures the status code for the request log.
 type statusRecorder struct {
 	http.ResponseWriter
-	status int
+	status      int
+	wroteHeader bool
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
+	if r.wroteHeader {
+		return
+	}
+	if status >= 100 && status < 200 {
+		r.ResponseWriter.WriteHeader(status)
+		return
+	}
 	r.status = status
+	r.wroteHeader = true
 	r.ResponseWriter.WriteHeader(status)
+}
+
+func (r *statusRecorder) Write(p []byte) (int, error) {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(p)
+}
+
+// FlushError forwards a flush and records the implicit status.
+func (r *statusRecorder) FlushError() error {
+	if !r.wroteHeader {
+		r.WriteHeader(http.StatusOK)
+	}
+	return http.NewResponseController(r.ResponseWriter).Flush()
+}
+
+// PageHeaders prevents caches from storing private pages and fragments.
+func PageHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Add("Vary", "HX-Request")
+		w.Header().Add("Vary", "Accept")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // Unwrap lets http.ResponseController reach the underlying writer.
 func (r *statusRecorder) Unwrap() http.ResponseWriter {
 	return r.ResponseWriter
-}
-
-func newRequestID() string {
-	var b [8]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "unknown"
-	}
-	return hex.EncodeToString(b[:])
 }

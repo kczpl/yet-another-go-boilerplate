@@ -64,7 +64,13 @@ func (r *Repo) Delete(ctx context.Context, tokenHash string) error {
 }
 
 func (r *Repo) DeleteExpired(ctx context.Context) error {
-	_, err := r.db.Exec(ctx, "DELETE FROM sessions WHERE expires_at <= now()")
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM sessions WHERE token_hash IN (
+			SELECT token_hash FROM sessions
+			WHERE expires_at <= now()
+			ORDER BY expires_at
+			LIMIT 100
+		)`)
 	if err != nil {
 		return fmt.Errorf("deleting expired sessions: %w", err)
 	}

@@ -1,55 +1,71 @@
 set dotenv-load
+set positional-arguments
+
+staticcheck_version := "v0.8.1"
+gocognit_version := "v1.2.1"
+govulncheck_version := "v1.8.0"
 
 default:
   @just --list
 
-# Start the full stack (api + postgres)
+# Start the API and PostgreSQL.
 compose:
-  docker compose up
+  docker compose up --build api postgres
 
-# Run the API on the host (start postgres first: docker compose up postgres -d)
+# Run the API on the host. Start PostgreSQL first.
 app:
   go run ./cmd/api
 
-# Build the production binary into bin/api
+# Build the production binary.
 build:
   CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/api ./cmd/api
 
-# Format the code
+# Format the code.
 fmt:
   gofmt -l -w .
 
-# Run go vet, staticcheck, and check the format
+# Run the analyzers and check the format.
 lint:
   go vet ./...
-  go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+  go run honnef.co/go/tools/cmd/staticcheck@{{staticcheck_version}} ./...
   @unformatted="$(gofmt -l .)"; if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
 
-# Run the tests (with the race detector) against the real test database
-test *flags="":
+# Compile all packages and tests without a database.
+types:
+  go test -race -run '^$' ./...
+
+# Limit cognitive complexity to 10 in application code and test support.
+complexity:
+  go run github.com/uudashr/gocognit/cmd/gocognit@{{gocognit_version}} -test=false -over 10 cmd internal migrations
+
+# Run the tests against PostgreSQL. Always run them without the result cache.
+test *flags:
   docker compose up -d --wait postgres-test
-  go test -race ./... {{ flags }}
+  go test -race -count=1 ./... "$@"
 
-ci: lint test
+ci: lint types complexity test vulncheck
 
-# Apply the migrations (they also run automatically on app startup)
+# Apply the migrations. App startup also applies them.
 migrate:
   go run ./cmd/api migrate
 
-# Create an account: just adduser ada@example.com 'Ada Lovelace'
+# Create an account and print its generated password.
 adduser email name:
-  go run ./cmd/api adduser {{ email }} '{{ name }}'
+  go run ./cmd/api adduser "$1" "$2"
 
-# Create a new migration: just makemigration create_users_table
+# Create a migration file. Use a name such as create_toys_table.
 makemigration name:
   #!/usr/bin/env bash
   set -euo pipefail
-  # A UTC timestamp prefix cannot collide across branches, unlike a
-  # sequence number. Lexical order stays correct.
-  file="migrations/$(date -u +%Y%m%d%H%M%S)_{{ name }}.sql"
-  printf -- '-- Write forward-only SQL. Migrations are append-only.\n-- Never edit an applied file. Add a new file instead.\n\n' > "$file"
+  if [[ ! "$1" =~ ^[a-z][a-z0-9_]*$ ]]; then
+    echo "Use lowercase letters, digits, and underscores for the migration name." >&2
+    exit 1
+  fi
+  file="migrations/$(date -u +%Y%m%d%H%M%S)_$1.sql"
+  set -o noclobber
+  printf -- '-- Write SQL that moves the schema forward.\n-- Never edit an applied file. Add a new file instead.\n\n' > "$file"
   echo "created $file"
 
-# Check the dependencies for known vulnerabilities
+# Check for known vulnerabilities with a pinned scanner and the live advisory database.
 vulncheck:
-  go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+  go run golang.org/x/vuln/cmd/govulncheck@{{govulncheck_version}} ./...

@@ -23,6 +23,9 @@ func NewService(repo Repository) *Service {
 
 // Add creates a note for userID. It returns ValidationError for bad input.
 func (s *Service) Add(ctx context.Context, userID, text string) (Note, error) {
+	if !utf8.ValidString(text) || strings.ContainsRune(text, '\x00') {
+		return Note{}, ValidationError("text must contain valid text")
+	}
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return Note{}, ValidationError("text must not be empty")

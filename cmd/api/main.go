@@ -35,6 +35,9 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, getenv func(string) string, stdout io.Writer) error {
+	if err := validateArgs(args); err != nil {
+		return err
+	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -77,6 +80,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 	}
 
 	errCh := make(chan error, 1)
+	defer srv.Close()
 	go func() { errCh <- srv.ListenAndServe() }()
 	logger.Info("server started", "addr", srv.Addr, "env", cfg.Env)
 
@@ -93,6 +97,25 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 		logger.Info("server stopped")
 		return nil
 	}
+}
+
+func validateArgs(args []string) error {
+	if len(args) <= 1 {
+		return nil
+	}
+	switch args[1] {
+	case "migrate":
+		if len(args) != 2 {
+			return errors.New("usage: api migrate")
+		}
+	case "adduser":
+		if len(args) != 4 {
+			return errors.New("usage: api adduser <email> <name>")
+		}
+	default:
+		return fmt.Errorf("unknown command %q (expected migrate or adduser)", args[1])
+	}
+	return nil
 }
 
 // addUser creates an account and prints a random temporary password once.

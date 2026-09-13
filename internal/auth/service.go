@@ -40,7 +40,7 @@ func (s *Service) Start(ctx context.Context, w http.ResponseWriter, userID strin
 	if err := s.repo.Insert(ctx, session); err != nil {
 		return fmt.Errorf("storing session: %w", err)
 	}
-	// Best-effort cleanup. A failure must not break the login.
+	// Remove at most 100 expired rows. A failure must not break the login.
 	_ = s.repo.DeleteExpired(ctx)
 
 	http.SetCookie(w, s.cookie(token, s.ttl))

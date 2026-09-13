@@ -14,6 +14,7 @@
 {{define "notes-section"}}
 <section id="notes-section" class="card">
   <h2>My notes</h2>
+  <p class="muted">Showing up to 100 recent notes.</p>
   {{with .Error}}<p class="notice error">{{.}}</p>{{end}}
 
   {{if .Notes}}

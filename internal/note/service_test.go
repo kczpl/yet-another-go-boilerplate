@@ -75,6 +75,8 @@ func TestAddValidation(t *testing.T) {
 	}{
 		{"empty text", ""},
 		{"blank text", "   "},
+		{"nul text", "note\x00"},
+		{"invalid UTF-8 text", "note\xff"},
 		{"too long text", strings.Repeat("x", 10001)},
 	}
 	for _, tt := range tests {
@@ -119,5 +121,35 @@ func TestDeleteEnforcesOwnership(t *testing.T) {
 	}
 	if len(notes) != 0 {
 		t.Errorf("List after delete returned %d notes, want 0", len(notes))
+	}
+}
+
+func TestListLimitsRowsAndScopesOwner(t *testing.T) {
+	t.Parallel()
+	pool := testdb.New(t)
+	svc := note.NewService(note.NewRepo(pool))
+	owner := seedUser(t, pool)
+	other := seedUser(t, pool)
+	_, err := pool.Exec(t.Context(), `INSERT INTO notes (user_id, text) SELECT $1, n::text FROM generate_series(1, 101) n`, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Add(t.Context(), other, "private note"); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := svc.List(t.Context(), owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 100 {
+		t.Fatalf("got %d notes, want 100", len(notes))
+	}
+	for i, n := range notes {
+		if n.UserID != owner {
+			t.Fatal("list contains another user's note")
+		}
+		if i > 0 && notes[i-1].ID <= n.ID {
+			t.Fatal("rows with equal timestamps are not ordered by descending ID")
+		}
 	}
 }

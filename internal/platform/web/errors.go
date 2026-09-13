@@ -38,11 +38,6 @@ func BadRequest(msg string) *HTTPError {
 	return &HTTPError{Status: http.StatusBadRequest, Msg: msg}
 }
 
-// Unauthorized builds a 401 with a client-safe message.
-func Unauthorized(msg string) *HTTPError {
-	return &HTTPError{Status: http.StatusUnauthorized, Msg: msg}
-}
-
 // NotFound builds a 404 with a client-safe message.
 func NotFound(msg string) *HTTPError {
 	return &HTTPError{Status: http.StatusNotFound, Msg: msg}

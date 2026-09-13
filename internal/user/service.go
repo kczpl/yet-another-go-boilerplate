@@ -50,6 +50,9 @@ func (s *Service) Register(ctx context.Context, email, name, password string) (U
 // ErrInvalidCredentials. That error is the same for an unknown email and a
 // wrong password.
 func (s *Service) Authenticate(ctx context.Context, email, password string) (User, error) {
+	if len(password) > maxPasswordLength {
+		return User{}, ErrInvalidCredentials
+	}
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return User{}, ErrInvalidCredentials
@@ -92,6 +95,9 @@ func (s *Service) UpdateProfile(ctx context.Context, id, email, name string) (Us
 }
 
 func normalizeEmail(email string) (string, error) {
+	if !utf8.ValidString(email) || strings.ContainsRune(email, '\x00') {
+		return "", ValidationError("enter a valid email address")
+	}
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" || len(email) > 254 {
 		return "", ValidationError("enter a valid email address")
@@ -106,6 +112,9 @@ func normalizeEmail(email string) (string, error) {
 }
 
 func normalizeName(name string) (string, error) {
+	if !utf8.ValidString(name) || strings.ContainsRune(name, '\x00') {
+		return "", ValidationError("name must contain valid text")
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return "", ValidationError("name must not be empty")
@@ -117,11 +126,14 @@ func normalizeName(name string) (string, error) {
 }
 
 func validatePassword(password string) error {
-	if len(password) < minPasswordLength {
+	if !utf8.ValidString(password) {
+		return ValidationError("password must contain valid text")
+	}
+	if utf8.RuneCountInString(password) < minPasswordLength {
 		return ValidationError(fmt.Sprintf("password must be at least %d characters", minPasswordLength))
 	}
 	if len(password) > maxPasswordLength {
-		return ValidationError(fmt.Sprintf("password must be at most %d characters", maxPasswordLength))
+		return ValidationError(fmt.Sprintf("password must be at most %d bytes", maxPasswordLength))
 	}
 	return nil
 }

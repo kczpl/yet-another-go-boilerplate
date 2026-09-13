@@ -146,24 +146,27 @@ func handleMeUpdate(svc *Service) web.HandlerE {
 				Form:  form,
 				Error: msg,
 			}
-			if web.IsHTMX(r) {
-				return web.RenderFragment(w, http.StatusUnprocessableEntity, meTmpl, "profile-section", data)
-			}
-			return web.RenderPage(w, http.StatusUnprocessableEntity, meTmpl, data)
+			return respondProfile(w, r, http.StatusUnprocessableEntity, data)
 		}
 
-		if web.IsHTMX(r) {
-			return web.RenderFragment(w, http.StatusOK, meTmpl, "profile-section", meData{
-				Page:  web.Page{Title: "Home", LoggedIn: true},
-				User:  u,
-				Form:  profileForm{Email: u.Email, Name: u.Name},
-				Saved: true,
-			})
-		}
-		// Redirect, so a refresh does not resubmit the form (PRG).
+		return respondProfile(w, r, http.StatusOK, meData{
+			Page:  web.Page{Title: "Home", LoggedIn: true},
+			User:  u,
+			Form:  profileForm{Email: u.Email, Name: u.Name},
+			Saved: true,
+		})
+	}
+}
+
+func respondProfile(w http.ResponseWriter, r *http.Request, status int, data meData) error {
+	if web.IsHTMX(r) {
+		return web.RenderFragment(w, status, meTmpl, "profile-section", data)
+	}
+	if status == http.StatusOK {
 		http.Redirect(w, r, "/me?saved=1", http.StatusSeeOther)
 		return nil
 	}
+	return web.RenderPage(w, status, meTmpl, data)
 }
 
 // formError maps service errors to a message that is safe to show in the

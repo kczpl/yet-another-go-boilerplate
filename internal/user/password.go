@@ -16,9 +16,10 @@ import (
 // the iteration count keeps old hashes valid.
 const (
 	// This is the OWASP minimum for PBKDF2-HMAC-SHA256.
-	pbkdf2Iterations = 600_000
-	saltLength       = 16
-	keyLength        = 32
+	pbkdf2Iterations    = 600_000
+	maxPBKDF2Iterations = 1_200_000
+	saltLength          = 16
+	keyLength           = 32
 )
 
 func hashPassword(password string) (string, error) {
@@ -43,15 +44,15 @@ func verifyPassword(hash, password string) bool {
 		return false
 	}
 	iterations, err := strconv.Atoi(parts[1])
-	if err != nil || iterations < 1 {
+	if err != nil || iterations < 1 || iterations > maxPBKDF2Iterations {
 		return false
 	}
 	salt, err := base64.RawURLEncoding.DecodeString(parts[2])
-	if err != nil || len(salt) == 0 {
+	if err != nil || len(salt) != saltLength {
 		return false
 	}
 	want, err := base64.RawURLEncoding.DecodeString(parts[3])
-	if err != nil || len(want) == 0 {
+	if err != nil || len(want) != keyLength {
 		return false
 	}
 	got, err := pbkdf2.Key(sha256.New, password, salt, iterations, len(want))

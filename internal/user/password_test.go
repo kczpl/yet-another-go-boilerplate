@@ -53,6 +53,9 @@ func TestVerifyPasswordRejectsMalformedHashes(t *testing.T) {
 		{"missing part", strings.Join(strings.Split(valid, "$")[:3], "$")},
 		{"bad iterations", strings.Replace(valid, "$600000$", "$abc$", 1)},
 		{"zero iterations", strings.Replace(valid, "$600000$", "$0$", 1)},
+		{"excessive iterations", strings.Replace(valid, "$600000$", "$2147483647$", 1)},
+		{"short salt", "pbkdf2-sha256$1$YQ$" + strings.Split(valid, "$")[3]},
+		{"short key", strings.Join(strings.Split(valid, "$")[:3], "$") + "$YQ"},
 		{"bad salt encoding", strings.Replace(valid, "$600000$", "$600000$!!!$", 1)},
 		{"tampered key", valid[:len(valid)-4] + "AAAA"},
 	}

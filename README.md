@@ -1,7 +1,7 @@
 # yet-another-go-boilerplate
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go&logoColor=white">
+  <img alt="Go" src="https://img.shields.io/badge/Go-1.26.8+-00ADD8?logo=go&logoColor=white">
   <img alt="net/http" src="https://img.shields.io/badge/net%2Fhttp-stdlib-00ADD8?logo=go&logoColor=white">
   <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white">
   <img alt="pgx" src="https://img.shields.io/badge/pgx-v5-336791?logo=postgresql&logoColor=white">
@@ -32,7 +32,7 @@ migrations/         embedded SQL migrations, applied on startup (append-only; ne
 internal/
   platform/         shared infrastructure — features import it, it imports no feature
     config/         env-driven configuration
-    database/       pgx pool (SQL logging at debug) + ~80-line migrator
+    database/       pgx pool (SQL traces at debug) + embedded SQL migrator
     logging/        slog construction + context-carried log attributes
     web/            layout, template rendering, static assets, middleware
   app/              composition: wires every feature into one http.Handler
@@ -93,10 +93,17 @@ There is no register page — `just adduser` (a thin CLI wrapper around
 
 - htmx 2 is vendored into `internal/platform/web/static/` and embedded into
   the binary. There is no npm, no bundler, no build step.
+- The app requires Go 1.26.8 or newer. go.mod and Dockerfile pin the same
+  supported patch version.
 - Every form is a plain HTML form first; htmx attributes upgrade it. With
   JavaScript disabled, handlers answer with redirects (POST → redirect → GET)
   and full pages. Even delete is a real form (`POST /notes/{id}/delete`) —
   browser-facing routes use only GET and POST.
+- htmx disables eval, script tags in fragments, inline indicator styles, and
+  local history storage. A small external `static/app.js` shows request
+  failures without clearing the form.
+- Dynamic responses use `Cache-Control: no-store` and vary by `HX-Request`
+  and `Accept`. Unversioned static assets require revalidation.
 - With htmx, handlers re-render one fragment (`#profile-section`,
   `#notes-section`) and swap it — on success and on 422 validation errors.
 - `/me` is a small dashboard: one screen with the profile card and the note
@@ -113,11 +120,14 @@ There is no register page — `just adduser` (a thin CLI wrapper around
 - Login stores a 43-character random token in a `session_id` cookie
   (`HttpOnly`, `SameSite=Lax`, `Secure` outside development).
 - The database stores only the SHA-256 hash of the token; expiry is enforced
-  in SQL.
+  in SQL. Each login attempts a bounded cleanup of expired rows. A database
+  failure returns 500 and preserves the session cookie.
 - Passwords are hashed with stdlib PBKDF2-HMAC-SHA256 (600k iterations) in a
-  self-describing format, so the cost can be raised later.
+  self-describing format, so the cost can be raised later. New passwords
+  require at least 8 Unicode characters and at most 512 bytes; login enforces
+  the byte cap before hashing.
 - CSRF: stdlib `http.CrossOriginProtection` rejects cross-origin unsafe
-  requests via `Sec-Fetch-Site` — no tokens needed.
+  requests via `Sec-Fetch-Site`, with an `Origin` fallback — no tokens needed.
 - Every response carries security headers (a strict CSP — possible because
   all assets are self-hosted — plus `nosniff`, `X-Frame-Options`,
   `Referrer-Policy`), and `http.MaxBytesHandler` caps request bodies.
@@ -135,7 +145,8 @@ Middleware stores correlation attributes in the request context:
 Every record logged with a `*Context` method repeats them automatically —
 handler errors, template-render errors, panics, and even SQL. Set
 `LOG_LEVEL=debug` to log every query (via pgx `tracelog`), correlated with
-the request that ran it:
+the request that ran it. Traces omit SQL arguments and driver error payloads;
+password hashes and private text must not enter logs:
 
 ```
 level=INFO  msg=request method=POST path=/notes status=200 duration=6.5ms request_id=18ae0ca4eba5e38b
@@ -159,21 +170,33 @@ The race detector is always on.
 ## Commands
 
 ```bash
-just app / compose / build / fmt / lint / test / ci
+just app / compose / build / fmt / lint / types / complexity / test / ci
 just migrate                          # apply migrations (startup does this too)
 just makemigration create_toys_table  # new migration file (timestamp-named)
 just adduser bob@example.com "Bob"    # create an account, prints the password
 just vulncheck                        # govulncheck
 ```
 
-CI (`.github/workflows/ci.yml`) runs `just ci` and `govulncheck` on every
-push and pull request — the same recipes you run locally, nothing more.
+`just types` uses the Go compiler to check application and test code without
+running tests or connecting to a database. A separate type checker is not
+needed. `just complexity` uses gocognit with a cognitive complexity limit of
+10 for application code and test support; test functions are excluded.
+Staticcheck, gocognit, and govulncheck versions are pinned in the justfile.
+They do not add application dependencies.
+
+`just ci` runs lint, types, complexity, race tests, and vulnerability checks.
+CI runs that recipe on main pushes and pull requests, then builds the Docker
+image. `just test` disables the test result cache and accepts extra Go flags.
+The test database uses a separate Compose profile and tmpfs. Its data is
+disposable; the application database keeps its persistent volume.
 
 ## Working with AI agents
 
 `CLAUDE.md` + path-scoped rules in `.claude/rules/` + vendored
 [spf13/go-skills](https://github.com/spf13/go-skills) in `.claude/skills/`
-give coding agents the project conventions up front. The codebase is
+give coding agents the project conventions up front. Local rules take
+precedence over the generic skill where they differ. Agents must read the
+relevant rules; path-based auto-loading depends on the agent tool. The codebase is
 deliberately explicit and denormalized — every query written out, every
 dependency injected by hand — so agents (and humans) can read any file in
 isolation.
@@ -191,3 +214,15 @@ go mod edit -module github.com/you/your-service
 grep -rl 'github.com/kczpl/yet-another-go-boilerplate' --include='*.go' . \
   | xargs sed -i '' 's|github.com/kczpl/yet-another-go-boilerplate|github.com/you/your-service|g'
 ```
+
+## Scope and production setup
+
+The note example shows the latest 100 rows. Add keyset pagination when a
+product needs to browse all notes. The template deliberately has no public
+registration, password reset, workers, ORM, or generic unit of work.
+
+Before public deployment, configure login rate limits and TLS/HSTS at the
+edge, and decide on session caps, session cleanup, and backups. Expiry blocks
+access but does not remove a row by itself. The migrator records filenames
+and requires append-only review; it does not verify applied file checksums.
+See `.claude/rules/security.md` and [the review report](docs/review.md).

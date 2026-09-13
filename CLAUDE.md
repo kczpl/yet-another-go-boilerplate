@@ -7,7 +7,7 @@ No frameworks, no ORM, no DI container — explicit wiring in `internal/app`.
 
 ## Quick Reference
 
-- Go 1.26 · router: stdlib `http.ServeMux` · DB: PostgreSQL 18 + `jackc/pgx/v5`
+- Go 1.26.8 · router: stdlib `http.ServeMux` · DB: PostgreSQL 18 + `jackc/pgx/v5`
 - **pgx is the only direct dependency.** Sessions, PBKDF2 password hashing,
   CSRF (`http.CrossOriginProtection`), body cap (`http.MaxBytesHandler`),
   templates, migrations: all stdlib. `web.SecureHeaders` adds CSP & co.
@@ -25,8 +25,9 @@ No frameworks, no ORM, no DI container — explicit wiring in `internal/app`.
 
 ## Rules & Skills
 
-Coding rules live in `.claude/rules/` and auto-load when editing matching
-files. They are the canonical convention reference — this file and README.md
+Coding rules live in `.claude/rules/`. They may auto-load in agents that
+support path rules. Other agents must read them explicitly. They are the
+canonical convention reference — this file and README.md
 only summarize them. **Read the relevant rule before editing:**
 
 | File | Covers |
@@ -38,7 +39,7 @@ only summarize them. **Read the relevant rule before editing:**
 | `security.md` | Session/password/CSRF/header invariants, input rules, pre-production checklist |
 
 `.claude/skills/go` (vendored from spf13/go-skills) is the idiomatic-Go
-reference and loads automatically for any Go work.
+reference. Read it for Go work; local rules take precedence where they differ.
 
 ## Comments
 
@@ -102,11 +103,14 @@ just app             # run API on the host (needs: docker compose up postgres -d
 just build           # production binary → bin/api
 just fmt             # gofmt
 just lint            # go vet + staticcheck (pinned) + gofmt check
+just types           # compile application and tests without a DB
+just complexity      # cognitive complexity <= 10 (application + test support)
 just test            # spins up postgres-test, runs go test -race ./...
 just migrate         # apply migrations (also happens on startup)
 just makemigration create_toys_table
 just adduser bob@example.com "Bob"   # create an account, prints the password
-just ci              # lint + test — the same thing CI runs
+just ci              # lint + types + complexity + test + vulncheck
+                     # CI also builds the Docker image
 ```
 
 App at `http://localhost:8080`. There is no register page — create accounts
@@ -127,7 +131,7 @@ CSRF, body cap, unified 404).
 - PostgreSQL 18, UUIDv7 primary keys (`DEFAULT uuidv7()`), `timestamptz`
   everywhere. IDs are plain `string` in Go — no uuid library.
 - No ENUMs — `text` + `CHECK`. Every `UPDATE` sets `updated_at = now()`.
-- Every list query has a `LIMIT`; paginate by keyset, never by OFFSET.
+- Every feature list query has a `LIMIT`; paginate by keyset, never by OFFSET.
 - Always add a migration for schema changes (`just makemigration ...` —
   timestamp-named files); migrations are append-only — never edit an
   applied file.

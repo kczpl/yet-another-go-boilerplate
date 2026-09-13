@@ -52,6 +52,7 @@ func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handle
 	var pageHandler http.Handler = pages
 	pageHandler = sessions.LoadIdentity(logger, pageHandler)
 	pageHandler = http.NewCrossOriginProtection().Handler(pageHandler)
+	pageHandler = web.PageHeaders(pageHandler)
 
 	// The root mux keeps health probes and static assets outside the
 	// session and CSRF middleware: they are anonymous GETs and must not

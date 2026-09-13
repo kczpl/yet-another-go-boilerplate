@@ -80,3 +80,13 @@ func TestRunRejectsBadArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestBadArgsDoNotReadConfigOrTouchDatabase(t *testing.T) {
+	t.Parallel()
+	getenv := func(string) string { t.Fatal("bad command read configuration"); return "" }
+	for _, args := range [][]string{{"api", "unknown"}, {"api", "migrate", "extra"}, {"api", "adduser"}} {
+		if err := run(t.Context(), args, getenv, io.Discard); err == nil {
+			t.Fatalf("accepted arguments %v", args)
+		}
+	}
+}

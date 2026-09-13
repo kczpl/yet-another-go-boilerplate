@@ -66,6 +66,7 @@ func TestLogLevel(t *testing.T) {
 		{"debug", "debug", false},
 		{"uppercase warn", "WARN", false},
 		{"typo fails validation", "debgu", true},
+		{"offset level fails validation", "INFO+1", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,6 +80,18 @@ func TestLogLevel(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("Validate: %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidatePort(t *testing.T) {
+	t.Parallel()
+	for _, port := range []string{"abc", "0", "-1", "65536"} {
+		t.Run(port, func(t *testing.T) {
+			cfg := config.Load(getenvFrom(map[string]string{"PORT": port}))
+			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "PORT") {
+				t.Fatalf("Validate = %v, want a PORT error", err)
 			}
 		})
 	}

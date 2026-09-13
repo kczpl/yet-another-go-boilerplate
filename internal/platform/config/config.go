@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -54,11 +56,14 @@ func (c Config) Validate() error {
 	if !c.Development() && c.DatabaseURL == "" {
 		errs = append(errs, errors.New("DATABASE_URL is required outside development"))
 	}
-	if c.logLevelInput != "" {
-		var level slog.Level
-		if err := level.UnmarshalText([]byte(c.logLevelInput)); err != nil {
-			errs = append(errs, fmt.Errorf("LOG_LEVEL must be debug, info, warn, or error, got %q", c.logLevelInput))
-		}
+	switch strings.ToLower(c.logLevelInput) {
+	case "", "debug", "info", "warn", "error":
+	default:
+		errs = append(errs, fmt.Errorf("LOG_LEVEL must be debug, info, warn, or error, got %q", c.logLevelInput))
+	}
+	port, err := strconv.Atoi(c.Port)
+	if err != nil || port < 1 || port > 65535 {
+		errs = append(errs, errors.New("PORT must be an integer from 1 to 65535"))
 	}
 	return errors.Join(errs...)
 }

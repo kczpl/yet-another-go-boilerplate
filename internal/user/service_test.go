@@ -2,6 +2,7 @@ package user_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/kczpl/yet-another-go-boilerplate/internal/testdb"
@@ -47,6 +48,11 @@ func TestRegisterValidation(t *testing.T) {
 		{"display-name form", "Bob <bob@example.com>", "Bob", "s3cret-pass"},
 		{"empty name", "bob@example.com", "   ", "s3cret-pass"},
 		{"short password", "bob@example.com", "Bob", "1234567"},
+		{"short unicode password", "bob@example.com", "Bob", "ąąąą"},
+		{"long password", "bob@example.com", "Bob", strings.Repeat("x", 513)},
+		{"nul name", "bob@example.com", "Bob\x00", "s3cret-pass"},
+		{"invalid UTF-8 name", "bob@example.com", "Bob\xff", "s3cret-pass"},
+		{"invalid UTF-8 email", "bo\xffb@example.com", "Bob", "s3cret-pass"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,5 +152,16 @@ func TestGetUnknownID(t *testing.T) {
 	_, err := svc.Get(t.Context(), "0198c0de-0000-7000-8000-000000000000")
 	if !errors.Is(err, user.ErrNotFound) {
 		t.Errorf("Get = %v, want ErrNotFound", err)
+	}
+}
+
+func TestAuthenticateRejectsOversizedPasswordBeforeDatabase(t *testing.T) {
+	t.Parallel()
+	pool := testdb.New(t)
+	svc := user.NewService(user.NewRepo(pool))
+	pool.Close()
+	_, err := svc.Authenticate(t.Context(), "unknown@example.com", strings.Repeat("x", 513))
+	if !errors.Is(err, user.ErrInvalidCredentials) {
+		t.Fatalf("error = %v, want ErrInvalidCredentials before database access", err)
 	}
 }

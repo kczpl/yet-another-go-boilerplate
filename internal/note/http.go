@@ -2,9 +2,11 @@ package note
 
 import (
 	"embed"
+	"encoding/hex"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/kczpl/yet-another-go-boilerplate/internal/auth"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/web"
@@ -13,8 +15,8 @@ import (
 //go:embed templates/*.html
 var templatesFS embed.FS
 
-// notesTmpl is parsed once at startup. Immutable template sets are the one
-// allowed package-level variable.
+// notesTmpl holds the page template. The package parses it at startup
+// and does not change it.
 var notesTmpl = web.MustPage(templatesFS, "templates/notes.html")
 
 // Routes registers every endpoint of the feature. Add new routes here and
@@ -107,6 +109,10 @@ func handleNoteDelete(svc *Service) web.HandlerE {
 // browsers get a redirect on success and a full 422 page on an error, so
 // the flow works without JavaScript.
 func respondNotes(w http.ResponseWriter, r *http.Request, svc *Service, userID string, form noteForm, errMsg string) error {
+	if !web.IsHTMX(r) && errMsg == "" {
+		http.Redirect(w, r, "/notes", http.StatusSeeOther)
+		return nil
+	}
 	notes, err := svc.List(r.Context(), userID)
 	if err != nil {
 		return err
@@ -122,10 +128,6 @@ func respondNotes(w http.ResponseWriter, r *http.Request, svc *Service, userID s
 	if web.IsHTMX(r) {
 		return web.RenderFragment(w, status, notesTmpl, "notes-section", data)
 	}
-	if errMsg == "" {
-		http.Redirect(w, r, "/notes", http.StatusSeeOther)
-		return nil
-	}
 	return web.RenderPage(w, status, notesTmpl, data)
 }
 
@@ -135,17 +137,11 @@ func isUUID(s string) bool {
 	if len(s) != 36 {
 		return false
 	}
-	for i, c := range s {
-		if i == 8 || i == 13 || i == 18 || i == 23 {
-			if c != '-' {
-				return false
-			}
-			continue
-		}
-		isHex := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
-		if !isHex {
+	for _, i := range []int{8, 13, 18, 23} {
+		if s[i] != '-' {
 			return false
 		}
 	}
-	return true
+	decoded, err := hex.DecodeString(strings.ReplaceAll(s, "-", ""))
+	return err == nil && len(decoded) == 16
 }

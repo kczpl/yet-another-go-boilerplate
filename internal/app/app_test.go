@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/kczpl/yet-another-go-boilerplate/internal/app"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/config"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/logging"
@@ -22,6 +24,7 @@ import (
 type client struct {
 	t       *testing.T
 	handler http.Handler
+	pool    *pgxpool.Pool
 	users   *user.Service
 	cookie  *http.Cookie
 }
@@ -33,6 +36,7 @@ func newClient(t *testing.T) *client {
 	logger := logging.New(io.Discard, cfg)
 	return &client{
 		t:       t,
+		pool:    pool,
 		handler: app.New(logger, cfg, pool),
 		users:   user.NewService(user.NewRepo(pool)),
 	}
@@ -429,12 +433,11 @@ func TestSecurityHeaders(t *testing.T) {
 		}
 	}
 
-	// Static assets add the cache header. A deploy replaces the binary and
-	// with it the assets.
+	// Asset URLs have no version. Browsers must check them again.
 	rec = c.get("/static/style.css")
 	wantStatus(t, rec, http.StatusOK)
-	if got := rec.Header().Get("Cache-Control"); got != "public, max-age=3600" {
-		t.Errorf("Cache-Control = %q, want %q", got, "public, max-age=3600")
+	if got := rec.Header().Get("Cache-Control"); got != "public, no-cache" {
+		t.Errorf("Cache-Control = %q, want %q", got, "public, no-cache")
 	}
 }
 
@@ -462,7 +465,7 @@ func TestStaticAssets(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
 
-	for _, path := range []string{"/static/htmx.min.js", "/static/style.css"} {
+	for _, path := range []string{"/static/htmx.min.js", "/static/style.css", "/static/app.js"} {
 		rec := c.get(path)
 		wantStatus(t, rec, http.StatusOK)
 		if rec.Body.Len() == 0 {

@@ -166,3 +166,25 @@ func TestStartCleansUpExpiredSessions(t *testing.T) {
 		t.Errorf("expired sessions left = %d, want 0", count)
 	}
 }
+
+func TestExpiredSessionCleanupIsBounded(t *testing.T) {
+	t.Parallel()
+	pool := testdb.New(t)
+	owner := seedUser(t, pool)
+	_, err := pool.Exec(t.Context(), `INSERT INTO sessions (token_hash, user_id, expires_at) SELECT n::text, $1, now() - interval '1 hour' FROM generate_series(1, 105) n`, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := auth.NewService(auth.NewRepo(pool), time.Hour, false)
+	cookie := startSession(t, svc, owner)
+	var expired int
+	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM sessions WHERE expires_at <= now()").Scan(&expired); err != nil {
+		t.Fatal(err)
+	}
+	if expired != 5 {
+		t.Fatalf("expired rows = %d, want 5 after one cleanup batch", expired)
+	}
+	if _, err := svc.Identify(t.Context(), requestWith(cookie)); err != nil {
+		t.Fatalf("cleanup removed the live session: %v", err)
+	}
+}

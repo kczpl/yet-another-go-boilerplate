@@ -28,8 +28,11 @@ services:
       timeout: 3s
       retries: 30
 
-  # Ephemeral database for `just test`. It has no volume. A restart wipes it.
+  # Tests use this database. A container replacement removes its data.
   postgres-test:
+    profiles: [test]
+    tmpfs:
+      - /var/lib/postgresql
     image: postgres:18
     environment:
       POSTGRES_USER: app_test
