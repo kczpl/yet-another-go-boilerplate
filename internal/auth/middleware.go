@@ -23,7 +23,7 @@ func (s *Service) LoadIdentity(logger *slog.Logger, next http.Handler) http.Hand
 			r = r.WithContext(ctx)
 		case errors.Is(err, ErrNoSession):
 			// Clear a stale cookie, so the browser does not send it again.
-			if _, cookieErr := r.Cookie(cookieName); cookieErr == nil {
+			if _, cookieErr := r.Cookie(s.cookieName); cookieErr == nil {
 				http.SetCookie(w, s.cookie("", -1))
 			}
 		default:

@@ -24,9 +24,7 @@ const (
 
 func hashPassword(password string) (string, error) {
 	salt := make([]byte, saltLength)
-	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("generating salt: %w", err)
-	}
+	rand.Read(salt) // crypto/rand.Read never returns an error (Go 1.24+).
 	key, err := pbkdf2.Key(sha256.New, password, salt, pbkdf2Iterations, keyLength)
 	if err != nil {
 		return "", fmt.Errorf("deriving key: %w", err)

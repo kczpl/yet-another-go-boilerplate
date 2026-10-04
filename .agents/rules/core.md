@@ -6,18 +6,19 @@ paths:
 # Go Core Rules
 
 Style and structure rules for this codebase. The vendored `go` skill
-(`.claude/skills/go/SKILL.md`) is a reference for idiomatic Go. These local
+(`.agents/skills/go/SKILL.md`) is a reference for idiomatic Go. These local
 rules take precedence where the skill differs: retain `internal/`,
 feature-local HTTP code, repository interfaces, and stdlib-first tests.
 Do not add Afero, go-cmp, or another dependency solely because the skill
 suggests it. pgx remains the only direct application dependency. The files in
-`.claude/rules/` are the single source of truth for conventions —
-`README.md` and `CLAUDE.md` only summarize them.
+`.agents/rules/` are the single source of truth for conventions —
+`README.md` and `AGENTS.md` only summarize them.
 
 ## Package Layout: Features, Not Layers
 
 ```
-cmd/api/            main + run(); subcommands migrate, adduser; no business logic
+cmd/api/            main + run() + serve(); subcommands migrate, adduser; debug
+                    listener; no business logic
 migrations/         embedded SQL, append-only; new files are timestamp-prefixed
 internal/platform/  shared infrastructure: config, database, logging, web
 internal/app/       composition — the only place that wires features
@@ -55,9 +56,34 @@ internal/testdb/    test databases
    call `<name>.Routes(...)` on the pages mux.
 4. Wrap every authenticated route with `auth.RequireIdentity` inside
    `Routes` (see http.md).
-5. Write `service_test.go` (business rules + SQL) and extend
-   `internal/app/app_test.go` (user-visible flows).
+5. Write `service_test.go` (business rules + SQL) and add
+   `internal/app/<name>_test.go` (user-visible flows, see testing.md).
 6. `just ci` must pass.
+
+## Services: Business Logic
+
+`service.go` is the home of the business rules. A handler parses input and
+maps results. A repository runs SQL. Everything between the two belongs to
+the service:
+
+- Validate and normalize input (trim, length caps, allowed values). Return
+  the feature's `ValidationError` with a message that is safe to show.
+  Mirror each database `CHECK` as a Go constant (`maxTextLength`).
+- Scope every method to its owner. Methods take `ctx` first, then the
+  owner id, then the resource id: `Delete(ctx, userID, id)`. Repository
+  methods use the same order, so an argument swap is easy to see.
+- Make the product decisions: the page size, the default sort, what a
+  missing row means. `note.Service.List` owns `pageSize` and the cursor of
+  the next page. The repository only runs the query that it gets.
+- Coordinate several repository calls for one use case. When the writes
+  must succeed together, put them in one repository method (see
+  database.md). A service never opens a transaction.
+- Return feature types and sentinels (`ErrNotFound`). A service never
+  takes `http.Request` or `http.ResponseWriter` and never sees pgx types.
+  `auth.Service` is the documented exception (see http.md).
+- Keep a service method small and linear. When a rule grows, give it an
+  unexported function in `service.go` and a table test in
+  `service_test.go`.
 
 ## Dependency Direction & Cross-Feature Calls
 
@@ -100,10 +126,15 @@ internal/testdb/    test databases
 - Only `config.Load` reads the environment, through its `getenv` argument
   (`testdb` is the test-side exception). Everything else receives `Config`
   or the field it needs.
+- An unset `ENVIRONMENT` means production, so a missing variable fails
+  closed: `DATABASE_URL` is then required, the cookie is Secure, and HSTS
+  is on. Only development gets local defaults. The `just` host recipes set
+  `ENVIRONMENT=development` when `.env` does not set it.
 - `Config.Validate` must reject hard misconfiguration (unknown
   `ENVIRONMENT`, unknown `LOG_LEVEL`, missing `DATABASE_URL` outside
-  development, invalid `PORT`). The service refuses to start. It never uses
-  a silent fallback. Extend `Validate` when you add a config field with constraints.
+  development, invalid `PORT`, a `DEBUG_ADDR` that is not loopback). The
+  service refuses to start. It never uses a silent fallback. Extend
+  `Validate` when you add a config field with constraints.
 - Repository interfaces are defined in the feature (`repository.go`), next
   to their consumer (`Service`), and implemented in `postgres.go`. Keep
   `var _ Repository = (*Repo)(nil)` as the compile-time check.
@@ -129,9 +160,10 @@ internal/testdb/    test databases
 ## Logging
 
 - `log/slog` only, passed as a `*slog.Logger` constructor/function
-  argument. Build it only with `logging.New(w, cfg)`
-  (`internal/platform/logging`): text in development, JSON otherwise,
-  context-aware.
+  argument. Build it only with `logging.New(w, level, format)`
+  (`internal/platform/logging`). The logger is context-aware. `cmd/api`
+  picks `logging.Text` in development and `logging.JSON` otherwise; the
+  logging package does not import config.
 - On request paths, log with the `*Context` methods
   (`logger.ErrorContext(r.Context(), ...)`). The logging handler adds the
   context's correlation attributes to the record: `request_id` (seeded by
@@ -159,7 +191,7 @@ This template optimizes for readability and agentic editing, not DRY:
 ## Use Current Go
 
 - `go.mod` pins the version (currently 1.26.8) and is authoritative. When
-  bumping, keep the Dockerfile (`golang:1.xx.y`) and CLAUDE.md in sync.
+  bumping, keep the Dockerfile (`golang:1.xx.y`) and AGENTS.md in sync.
 - Use: `any`, `for i := range n`, `min`/`max`, `cmp.Or` for defaults,
   `slices`/`maps`, `math/rand/v2`, `errors.Join`, `crypto/pbkdf2`,
   `http.CrossOriginProtection`, `http.MaxBytesHandler`.

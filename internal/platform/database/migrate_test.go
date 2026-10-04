@@ -3,10 +3,13 @@ package database_test
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"testing/fstest"
 
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/database"
+	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/logging"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/testdb"
 )
 
@@ -62,6 +65,26 @@ func TestMigrateRollsBackFailedFile(t *testing.T) {
 	files["9001_failure.sql"] = &fstest.MapFile{Data: []byte("CREATE TABLE rollback_probe (id integer)")}
 	if err := database.Migrate(t.Context(), pool, files); err != nil {
 		t.Fatalf("retry: %v", err)
+	}
+}
+
+func TestMigrateIgnoresStatementTimeout(t *testing.T) {
+	t.Parallel()
+	base := testdb.New(t).Config().ConnString()
+	logger := logging.New(io.Discard, slog.LevelInfo, logging.JSON)
+	pool, err := database.Connect(t.Context(), withParam(t, base, "statement_timeout", "50ms"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+
+	files := fstest.MapFS{"9001_slow.sql": {Data: []byte("SELECT pg_sleep(0.2)")}}
+	if err := database.Migrate(t.Context(), pool, files); err != nil {
+		t.Fatalf("slow migration: %v, want no statement timeout", err)
+	}
+	// The exemption must not leak into the pool.
+	if _, err := pool.Exec(t.Context(), "SELECT pg_sleep(0.2)"); err == nil {
+		t.Fatal("a slow query after Migrate passed the statement timeout")
 	}
 }
 

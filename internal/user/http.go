@@ -23,10 +23,14 @@ var (
 // Routes registers every endpoint of the feature. Login lives here, not in
 // auth, because it needs Service. There is no register page — create
 // accounts with Service.Register from code you control.
-func Routes(mux *http.ServeMux, logger *slog.Logger, svc *Service, sessions *auth.Service) {
+//
+// loginLimiter caps the login attempts of each client. Without it, the
+// endpoint permits brute force, and each attempt costs a full password
+// hash.
+func Routes(mux *http.ServeMux, logger *slog.Logger, svc *Service, sessions *auth.Service, loginLimiter *web.RateLimiter) {
 	mux.Handle("GET /{$}", web.E(logger, handleHome()))
 	mux.Handle("GET /login", web.E(logger, handleLoginPage()))
-	mux.Handle("POST /login", web.E(logger, handleLogin(svc, sessions)))
+	mux.Handle("POST /login", web.E(logger, loginLimiter.Limit(handleLogin(svc, sessions))))
 	mux.Handle("GET /me", auth.RequireIdentity(web.E(logger, handleMe(svc))))
 	mux.Handle("POST /me", auth.RequireIdentity(web.E(logger, handleMeUpdate(svc))))
 }

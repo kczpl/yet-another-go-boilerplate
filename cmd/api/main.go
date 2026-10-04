@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,8 +35,13 @@ func main() {
 	}
 }
 
+// command is a subcommand. It runs after the migrations, and then the
+// process exits.
+type command func(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, stdout io.Writer) error
+
 func run(ctx context.Context, args []string, getenv func(string) string, stdout io.Writer) error {
-	if err := validateArgs(args); err != nil {
+	cmd, err := parseCommand(args)
+	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
@@ -45,7 +51,11 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 	if err := cfg.Validate(); err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
-	logger := logging.New(stdout, cfg)
+	format := logging.JSON
+	if cfg.Development() {
+		format = logging.Text
+	}
+	logger := logging.New(stdout, cfg.LogLevel, format)
 
 	pool, err := database.Connect(ctx, cfg.DatabaseURL, logger)
 	if err != nil {
@@ -56,20 +66,45 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 	if err := database.Migrate(ctx, pool, migrations.FS); err != nil {
 		return fmt.Errorf("running migrations: %w", err)
 	}
-	// A subcommand runs after the migrations and exits. Without a
-	// subcommand, run starts the server.
-	if len(args) > 1 {
-		switch args[1] {
-		case "migrate":
+	if cmd != nil {
+		return cmd(ctx, pool, logger, stdout)
+	}
+	return serve(ctx, cfg, logger, pool)
+}
+
+// parseCommand checks the command name and the argument count before any
+// configuration or database work. It returns a nil command when args name
+// no subcommand: run then starts the server.
+func parseCommand(args []string) (command, error) {
+	if len(args) <= 1 {
+		return nil, nil
+	}
+	switch args[1] {
+	case "migrate":
+		if len(args) != 2 {
+			return nil, errors.New("usage: api migrate")
+		}
+		// run applies the migrations before every command.
+		return func(_ context.Context, _ *pgxpool.Pool, logger *slog.Logger, _ io.Writer) error {
 			logger.Info("migrations applied")
 			return nil
-		case "adduser":
-			return addUser(ctx, pool, args[2:], stdout)
-		default:
-			return fmt.Errorf("unknown command %q (expected migrate or adduser)", args[1])
+		}, nil
+	case "adduser":
+		if len(args) != 4 {
+			return nil, errors.New("usage: api adduser <email> <name>")
 		}
+		email, name := args[2], args[3]
+		return func(ctx context.Context, pool *pgxpool.Pool, _ *slog.Logger, stdout io.Writer) error {
+			return addUser(ctx, pool, email, name, stdout)
+		}, nil
+	default:
+		return nil, fmt.Errorf("unknown command %q (expected migrate or adduser)", args[1])
 	}
+}
 
+// serve runs the HTTP server until ctx ends or a listener fails. Then it
+// drains the open requests.
+func serve(ctx context.Context, cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) error {
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
 		Handler:           app.New(logger, cfg, pool),
@@ -78,9 +113,18 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-
-	errCh := make(chan error, 1)
 	defer srv.Close()
+
+	// Each listener sends at most one error.
+	errCh := make(chan error, 2)
+	if cfg.DebugAddr != "" {
+		debugSrv, err := startDebugServer(cfg.DebugAddr, errCh)
+		if err != nil {
+			return err
+		}
+		defer debugSrv.Close()
+		logger.Info("debug server started", "addr", cfg.DebugAddr)
+	}
 	go func() { errCh <- srv.ListenAndServe() }()
 	logger.Info("server started", "addr", srv.Addr, "env", cfg.Env)
 
@@ -99,40 +143,14 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 	}
 }
 
-func validateArgs(args []string) error {
-	if len(args) <= 1 {
-		return nil
-	}
-	switch args[1] {
-	case "migrate":
-		if len(args) != 2 {
-			return errors.New("usage: api migrate")
-		}
-	case "adduser":
-		if len(args) != 4 {
-			return errors.New("usage: api adduser <email> <name>")
-		}
-	default:
-		return fmt.Errorf("unknown command %q (expected migrate or adduser)", args[1])
-	}
-	return nil
-}
-
 // addUser creates an account and prints a random temporary password once.
 // There is no register page — this command is the way to create accounts.
 // It never accepts a password argument: argv leaks into the shell history
 // and the process list.
-func addUser(ctx context.Context, pool *pgxpool.Pool, args []string, stdout io.Writer) error {
-	if len(args) != 2 {
-		return errors.New("usage: api adduser <email> <name>")
-	}
-	email, name := args[0], args[1]
-
+func addUser(ctx context.Context, pool *pgxpool.Pool, email, name string, stdout io.Writer) error {
 	// 18 random bytes encode to 24 base64url characters.
 	raw := make([]byte, 18)
-	if _, err := rand.Read(raw); err != nil {
-		return fmt.Errorf("generating password: %w", err)
-	}
+	rand.Read(raw) // crypto/rand.Read never returns an error (Go 1.24+).
 	password := base64.RawURLEncoding.EncodeToString(raw)
 
 	users := user.NewService(user.NewRepo(pool))

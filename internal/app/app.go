@@ -20,6 +20,14 @@ import (
 
 const sessionTTL = 7 * 24 * time.Hour
 
+// A client can try 10 logins at once and after that one login every 20
+// seconds (180 per hour). A person who mistypes a password does not reach
+// the limit. A password guesser gets only a few thousand tries per day.
+const (
+	loginBurst    = 10
+	loginInterval = 20 * time.Second
+)
+
 // maxRequestBytes caps every request body. The largest legitimate body in
 // this app is a small HTML form; 1 MiB leaves generous room.
 const maxRequestBytes = 1 << 20
@@ -31,12 +39,13 @@ func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handle
 	users := user.NewService(user.NewRepo(pool))
 	notes := note.NewService(note.NewRepo(pool))
 	sessions := auth.NewService(auth.NewRepo(pool), sessionTTL, !cfg.Development())
+	loginLimiter := web.NewRateLimiter(loginInterval, loginBurst, cfg.ClientIPHeader)
 
 	// The pages mux holds every feature route. It sits behind the session
 	// and CSRF middleware.
 	pages := http.NewServeMux()
 	auth.Routes(pages, logger, sessions)
-	user.Routes(pages, logger, users, sessions)
+	user.Routes(pages, logger, users, sessions, loginLimiter)
 	note.Routes(pages, logger, notes)
 
 	// The pattern "/" catches every request that no other route matches.
@@ -58,7 +67,8 @@ func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handle
 	// session and CSRF middleware: they are anonymous GETs and must not
 	// cost a database lookup.
 	root := http.NewServeMux()
-	root.Handle("GET /healthz", handleHealthz(pool))
+	root.Handle("GET /livez", handleLivez())
+	root.Handle("GET /readyz", handleReadyz(pool))
 	root.Handle("GET /static/", web.Static())
 	root.Handle("/", pageHandler)
 
@@ -66,17 +76,31 @@ func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handle
 	// error pages included.
 	var handler http.Handler = root
 	handler = http.MaxBytesHandler(handler, maxRequestBytes)
-	handler = web.SecureHeaders(handler)
+	// HSTS needs HTTPS. Outside development, a TLS proxy is in front of
+	// the app (see security.md).
+	handler = web.SecureHeaders(handler, !cfg.Development())
 	handler = web.RecoverPanics(logger, handler)
 	handler = web.LogRequests(logger, handler)
 	return handler
 }
 
-// handleHealthz reports that the service and the database are alive. It
-// stays a plain http.Handler on purpose: load-balancer probes expect a
-// plain text body, and a database outage must not spam the error log
-// through web.E on every probe.
-func handleHealthz(pool *pgxpool.Pool) http.Handler {
+// The probe handlers stay plain http.Handler values on purpose: probes
+// expect a plain text body, and a database outage must not fill the error
+// log through web.E on every probe.
+
+// handleLivez reports that the process can serve HTTP. It does not use the
+// database. An orchestrator restarts the process when this probe fails, and
+// a restart does not repair a database outage.
+func handleLivez() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		_, _ = w.Write([]byte("ok"))
+	})
+}
+
+// handleReadyz reports that the process can serve requests: it pings the
+// database. A load balancer stops sending traffic while this probe fails.
+func handleReadyz(pool *pgxpool.Pool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 		defer cancel()

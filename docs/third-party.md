@@ -8,6 +8,6 @@ The application vendors htmx 2.0.10 without changes.
 To update htmx, copy the distribution file from a release tag, record its
 version and checksum here, and verify forms and CSP in a browser.
 
-The agent skills under `.claude/skills/` come from spf13/go-skills. Their
-source and update instructions are in `.claude/skills/README.md`. They are
+The agent skills under `.agents/skills/` come from spf13/go-skills. Their
+source and update instructions are in `.agents/skills/README.md`. They are
 development guidance and do not enter the application binary.

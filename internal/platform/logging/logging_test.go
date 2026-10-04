@@ -6,13 +6,12 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/config"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/logging"
 )
 
 // jsonLogger returns a logger that writes JSON lines into buf.
 func jsonLogger(buf *bytes.Buffer) *slog.Logger {
-	return logging.New(buf, config.Config{Env: "production"})
+	return logging.New(buf, slog.LevelInfo, logging.JSON)
 }
 
 func lastLine(t *testing.T, buf *bytes.Buffer) map[string]any {

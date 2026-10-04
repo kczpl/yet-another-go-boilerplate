@@ -1,6 +1,7 @@
 .git
 .github
 .env
+.agents
 .claude
 bin
 *.md

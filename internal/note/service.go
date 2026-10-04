@@ -11,6 +11,9 @@ import (
 // migrations/0003_create_notes.sql.
 const maxTextLength = 10000
 
+// pageSize is the number of notes on one page.
+const pageSize = 20
+
 // Service keeps the business rules. Every method takes the owner's userID.
 // Ownership lives here and in the SQL, never in the handlers.
 type Service struct {
@@ -36,13 +39,25 @@ func (s *Service) Add(ctx context.Context, userID, text string) (Note, error) {
 	return s.repo.Insert(ctx, userID, text)
 }
 
-// List returns userID's notes, newest first, at most listLimit rows.
-func (s *Service) List(ctx context.Context, userID string) ([]Note, error) {
-	return s.repo.ListByUser(ctx, userID)
+// List returns one page of userID's notes, newest first. A zero after
+// starts at the newest note. next is the cursor of the following page. It
+// is zero on the last page.
+func (s *Service) List(ctx context.Context, userID string, after Cursor) (notes []Note, next Cursor, err error) {
+	// One extra row shows if a following page exists.
+	notes, err = s.repo.ListByUser(ctx, userID, after, pageSize+1)
+	if err != nil {
+		return nil, Cursor{}, err
+	}
+	if len(notes) > pageSize {
+		notes = notes[:pageSize]
+		last := notes[pageSize-1]
+		next = Cursor{CreatedAt: last.CreatedAt, ID: last.ID}
+	}
+	return notes, next, nil
 }
 
 // Delete removes userID's note. It returns ErrNotFound for unknown ids and
 // for notes that another user owns.
 func (s *Service) Delete(ctx context.Context, userID, id string) error {
-	return s.repo.Delete(ctx, id, userID)
+	return s.repo.Delete(ctx, userID, id)
 }

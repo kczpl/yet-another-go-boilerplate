@@ -43,6 +43,11 @@ func NotFound(msg string) *HTTPError {
 	return &HTTPError{Status: http.StatusNotFound, Msg: msg}
 }
 
+// TooManyRequests builds a 429 with a client-safe message.
+func TooManyRequests(msg string) *HTTPError {
+	return &HTTPError{Status: http.StatusTooManyRequests, Msg: msg}
+}
+
 // HandlerE is a handler that returns its error instead of writing the error
 // response itself. Wrap it with E.
 type HandlerE func(w http.ResponseWriter, r *http.Request) error

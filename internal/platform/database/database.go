@@ -12,12 +12,24 @@ import (
 	"github.com/jackc/pgx/v5/tracelog"
 )
 
+// defaultStatementTimeout stops a slow query before it holds a pool
+// connection for the whole request. The server cancels the statement, and
+// the caller gets an error.
+const defaultStatementTimeout = "5s"
+
 // Connect opens a pgx pool and pings it. A service that cannot reach its
 // database must not start. Queries are traced into logger at debug level.
+//
+// Each connection gets statement_timeout = defaultStatementTimeout. To
+// change it, add statement_timeout to the URL (for example
+// ?statement_timeout=30s). The value 0 disables the limit.
 func Connect(ctx context.Context, url string, logger *slog.Logger) (*pgxpool.Pool, error) {
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, fmt.Errorf("parsing database url: %w", err)
+	}
+	if _, ok := cfg.ConnConfig.RuntimeParams["statement_timeout"]; !ok {
+		cfg.ConnConfig.RuntimeParams["statement_timeout"] = defaultStatementTimeout
 	}
 	if logger.Enabled(ctx, slog.LevelDebug) {
 		cfg.ConnConfig.Tracer = &tracelog.TraceLog{

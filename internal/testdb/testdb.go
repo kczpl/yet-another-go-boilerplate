@@ -174,6 +174,6 @@ func withDatabase(base, dbname string) string {
 
 func randomSuffix() string {
 	b := make([]byte, 8)
-	_, _ = rand.Read(b) // crypto/rand.Read never fails
+	rand.Read(b) // crypto/rand.Read never returns an error (Go 1.24+).
 	return hex.EncodeToString(b)
 }

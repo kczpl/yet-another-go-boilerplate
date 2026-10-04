@@ -24,8 +24,8 @@ func LogRequests(logger *slog.Logger, next http.Handler) http.Handler {
 		ctx := logging.WithAttrs(r.Context(), slog.String("request_id", requestID))
 		r = r.WithContext(ctx)
 
-		// Do not log health checks. They drown out real traffic.
-		if r.URL.Path == "/healthz" {
+		// Do not log health probes. They drown out real traffic.
+		if r.URL.Path == "/livez" || r.URL.Path == "/readyz" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -47,7 +47,12 @@ func LogRequests(logger *slog.Logger, next http.Handler) http.Handler {
 // CSP permits only same-origin content plus data: images (the favicon);
 // htmx and the stylesheet come from /static, so 'self' covers them. Widen
 // a directive only with a comment that says why.
-func SecureHeaders(next http.Handler) http.Handler {
+//
+// With hsts, browsers must use HTTPS for this host for one year. Enable it
+// outside development: the app runs behind a TLS proxy there. Browsers
+// ignore the header on plain HTTP responses. The header does not include
+// subdomains, because the template does not know them.
+func SecureHeaders(next http.Handler, hsts bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Content-Security-Policy",
@@ -55,6 +60,19 @@ func SecureHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "same-origin")
+		if hsts {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// PageHeaders prevents caches from storing private pages and fragments.
+func PageHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Add("Vary", "HX-Request")
+		w.Header().Add("Vary", "Accept")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -117,16 +135,6 @@ func (r *statusRecorder) FlushError() error {
 		r.WriteHeader(http.StatusOK)
 	}
 	return http.NewResponseController(r.ResponseWriter).Flush()
-}
-
-// PageHeaders prevents caches from storing private pages and fragments.
-func PageHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Add("Vary", "HX-Request")
-		w.Header().Add("Vary", "Accept")
-		next.ServeHTTP(w, r)
-	})
 }
 
 // Unwrap lets http.ResponseController reach the underlying writer.

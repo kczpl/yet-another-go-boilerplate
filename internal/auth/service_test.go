@@ -60,8 +60,8 @@ func TestSessionLifecycle(t *testing.T) {
 
 	cookie := startSession(t, svc, userID)
 
-	if cookie.Name != "session_id" {
-		t.Errorf("cookie name = %q, want session_id", cookie.Name)
+	if cookie.Name != "__Host-session_id" {
+		t.Errorf("cookie name = %q, want __Host-session_id", cookie.Name)
 	}
 	if len(cookie.Value) != 43 {
 		t.Errorf("token length = %d, want 43 (32 bytes base64url)", len(cookie.Value))
@@ -82,6 +82,12 @@ func TestSessionLifecycle(t *testing.T) {
 	}
 	if identity.UserID != userID {
 		t.Errorf("UserID = %q, want %q", identity.UserID, userID)
+	}
+	// A secure service reads only the __Host- cookie. A cookie without the
+	// prefix can come from a subdomain or a plain HTTP page.
+	plain := &http.Cookie{Name: "session_id", Value: cookie.Value}
+	if _, err := svc.Identify(t.Context(), requestWith(plain)); !errors.Is(err, auth.ErrNoSession) {
+		t.Errorf("Identify with an unprefixed cookie = %v, want ErrNoSession", err)
 	}
 
 	// End revokes the session and clears the cookie.
@@ -171,7 +177,10 @@ func TestExpiredSessionCleanupIsBounded(t *testing.T) {
 	t.Parallel()
 	pool := testdb.New(t)
 	owner := seedUser(t, pool)
-	_, err := pool.Exec(t.Context(), `INSERT INTO sessions (token_hash, user_id, expires_at) SELECT n::text, $1, now() - interval '1 hour' FROM generate_series(1, 105) n`, owner)
+	// The expired rows belong to another user. The session cap of owner
+	// must not remove them, so only the cleanup batch counts.
+	other := seedUser(t, pool)
+	_, err := pool.Exec(t.Context(), `INSERT INTO sessions (token_hash, user_id, expires_at) SELECT n::text, $1, now() - interval '1 hour' FROM generate_series(1, 105) n`, other)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,5 +195,41 @@ func TestExpiredSessionCleanupIsBounded(t *testing.T) {
 	}
 	if _, err := svc.Identify(t.Context(), requestWith(cookie)); err != nil {
 		t.Fatalf("cleanup removed the live session: %v", err)
+	}
+}
+
+func TestStartCapsSessionsPerUser(t *testing.T) {
+	t.Parallel()
+	pool := testdb.New(t)
+	svc := auth.NewService(auth.NewRepo(pool), time.Hour, false)
+	owner := seedUser(t, pool)
+	other := seedUser(t, pool)
+	otherCookie := startSession(t, svc, other)
+
+	var cookies []*http.Cookie
+	for range 12 {
+		cookies = append(cookies, startSession(t, svc, owner))
+	}
+
+	var count int
+	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM sessions WHERE user_id = $1", owner).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 10 {
+		t.Fatalf("sessions = %d, want the cap of 10", count)
+	}
+	// The oldest sessions go first. The newest session always stays.
+	for i, cookie := range cookies {
+		_, err := svc.Identify(t.Context(), requestWith(cookie))
+		if i < 2 && !errors.Is(err, auth.ErrNoSession) {
+			t.Errorf("session %d = %v, want ErrNoSession (removed by the cap)", i, err)
+		}
+		if i >= 2 && err != nil {
+			t.Errorf("session %d = %v, want valid", i, err)
+		}
+	}
+	// The cap counts per user.
+	if _, err := svc.Identify(t.Context(), requestWith(otherCookie)); err != nil {
+		t.Errorf("session of another user = %v, want valid", err)
 	}
 }

@@ -19,6 +19,9 @@ paths:
   `postgres.go` imports pgx error types.
 - Document error behavior on the interface methods
   (`// Get returns ... or ErrNoSession.`).
+- Methods take `ctx` first, then the owner id, then the resource id:
+  `Delete(ctx, userID, id string)`. Services use the same order (see
+  core.md).
 
 ## SQL Conventions
 
@@ -40,10 +43,11 @@ paths:
 ## Queries at Scale
 
 - **Every feature list query has a `LIMIT`.** Migration and test database
-  catalogs are finite infrastructure metadata and are exempt. The canonical example is `listLimit`
-  in `internal/note/postgres.go`. An unbounded list works in the demo and
-  becomes an incident at scale.
-- When one page is not enough, paginate by keyset, never by `OFFSET`:
+  catalogs are finite infrastructure metadata and are exempt. An unbounded
+  list works in the demo and becomes an incident at scale.
+- Paginate by keyset, never by `OFFSET`. OFFSET reads and discards every
+  skipped row, and a concurrent insert moves rows between pages. The notes
+  list is the canonical example:
 
   ```sql
   WHERE user_id = @user_id
@@ -51,6 +55,20 @@ paths:
   ORDER BY created_at DESC, id DESC
   LIMIT @limit
   ```
+
+  - The feature type `note.Cursor` holds the sort key of the last row
+    (`created_at`, `id`). The zero Cursor means the first page.
+  - `note.Service.List` asks for `pageSize + 1` rows. The extra row only
+    tells it that a next page exists; it does not show the row.
+  - `ListByUser` writes out two queries: the first page without the
+    keyset condition, and the next pages with it. Do not build SQL from
+    fragments to merge them.
+  - The HTTP layer encodes the cursor as `<RFC3339Nano UTC>_<uuid>` in
+    `?after=` and rejects a malformed value with 400
+    (`internal/note/http.go`).
+- OFFSET is acceptable only for a small bounded set that is not a page,
+  for example the session cap in `internal/auth/postgres.go`, which reads
+  at most 11 rows of one user.
 
 - The keyset condition must match an index. The notes example already has
   the right shape: `(user_id, created_at DESC, id DESC)`. Give a new
@@ -61,8 +79,10 @@ paths:
 
 - **By default, a transaction stays inside one repository method.** An
   operation that needs several statements atomically is ONE repo method,
-  and that method wraps the statements in `pgx.BeginFunc` (pattern:
-  `internal/platform/database/migrate.go`).
+  and that method wraps the statements in `pgx.BeginFunc`. The feature
+  example is `auth.Repo.Insert`: it inserts a session and applies the
+  per-user session cap in one transaction. The infrastructure example is
+  `internal/platform/database/migrate.go`.
 - Services do not manage database transactions. A service may call several
   repository methods to carry out a use case. Separate calls are not atomic.
   When writes must succeed together, expose one repository operation that
@@ -73,6 +93,21 @@ paths:
   `pgx.Tx` through services. Do not merge unrelated features solely because
   they need one atomic operation. The template does not add a generic unit
   of work for a hypothetical future use case.
+
+## Timeouts
+
+- `database.Connect` sets `statement_timeout = 5s` on every pool
+  connection. PostgreSQL then cancels a slow statement, so it cannot hold
+  a pool connection for the whole request. To change the limit, add
+  `statement_timeout` to `DATABASE_URL` (`?statement_timeout=30s`; `0`
+  disables it).
+- Pass the request context to every query. When the client disconnects,
+  pgx cancels the query.
+- Work that is slow by design sets its own limit in its transaction:
+  `SET LOCAL statement_timeout = 0`. The migrator does this for the
+  advisory lock and for each migration file, so a long migration does not
+  fail at 5s. The value goes back to the default when the transaction
+  ends.
 
 ## IDs
 

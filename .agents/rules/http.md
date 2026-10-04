@@ -33,20 +33,29 @@ adapted to server-rendered HTML + htmx and to error-returning handlers.
 - A feature owns the URL prefix that matches its package name
   (`note` → `/notes`). The account feature owns `/`, `/login`, and `/me`;
   auth owns `/logout`. `app.New` registers infrastructure paths:
-  `/healthz`, `/static/`, and the `"/"` catch-all that turns every
+  `/livez`, `/readyz`, `/static/`, and the `"/"` catch-all that turns every
   unmatched request into the unified 404. The catch-all sits behind the
   CSRF guard, so a cross-origin POST to an unknown path gets 403, not
   404 — tests must expect that.
 - The middleware chain lives only in `app.New`. Keep this order (outermost
   first): `LogRequests` → `RecoverPanics` → `SecureHeaders` →
-  `MaxBytesHandler` → outer mux (`/healthz`, `/static/`) →
+  `MaxBytesHandler` → outer mux (`/livez`, `/readyz`, `/static/`) →
   `PageHeaders` → `CrossOriginProtection` → `LoadIdentity` → pages mux.
-- `/healthz` and `/static/` sit outside sessions and CSRF. Neither route
-  queries sessions. `/healthz` still pings PostgreSQL to check availability;
-  static assets do not use the database. `web.Static()`
+  `SecureHeaders` adds HSTS outside development.
+- `/livez`, `/readyz`, and `/static/` sit outside sessions and CSRF. None
+  of them queries sessions. `/livez` does not use the database: an
+  orchestrator restarts the process when liveness fails, and a restart does
+  not repair a database outage. `/readyz` pings PostgreSQL, so a load
+  balancer stops traffic during an outage. `LogRequests` does not log the
+  two probes. Static assets do not use the database. `web.Static()`
   sets `Cache-Control: public, no-cache` because asset URLs have no version.
   A deploy does not clear a browser cache. PageHeaders sets `no-store` and
   `Vary: HX-Request, Accept` on dynamic responses, including auth redirects.
+- A rate limit wraps the handler inside the error adapter:
+  `web.E(logger, limiter.Limit(handleLogin(...)))`. `app.New` constructs
+  each `web.RateLimiter` and passes it to `Routes`, so all limits and
+  `CLIENT_IP_HEADER` stay in one place. A limited request gets 429 with
+  `Retry-After` through `RespondError`. See security.md.
 - `LogRequests` puts the request id in the response header and adds it to
   the request's log attributes with `logging.WithAttrs`. `LoadIdentity`
   adds `user_id` to the context passed to authenticated handlers. Log calls
@@ -76,8 +85,14 @@ adapted to server-rendered HTML + htmx and to error-returning handlers.
   or headers directly. Behind `RequireIdentity` the identity always exists.
 - Page-data structs live next to their handlers and embed `web.Page`.
   Set `LoggedIn` explicitly per handler.
-- `handleHealthz` in `app.New` is the one plain `http.Handler`: probes
-  repeat every few seconds and must not go through error logging.
+- The probe handlers `handleLivez` and `handleReadyz` in `app.New` are the
+  only plain `http.Handler` values: probes repeat every few seconds and
+  must not go through error logging.
+- A list page reads its keyset cursor from the query string
+  (`GET /notes?after=<cursor>`). A malformed cursor is
+  `web.BadRequest`. A form that changes a row on that page sends the cursor
+  back, so the redirect or the fragment shows the same page. See
+  `internal/note/http.go` and database.md.
 
 ## Responses: Fragments and Redirects
 
@@ -152,8 +167,10 @@ Progressive enhancement — every flow must work without JavaScript:
   outside the error adapter: `auth.RequireIdentity(web.E(logger, h))`.
 - A database error in LoadIdentity returns the unified 500 and preserves
   the cookie. Only ErrNoSession means anonymous access.
-- Session cookie: `session_id`, HttpOnly, SameSite=Lax, Secure outside
-  development. The DB stores only the SHA-256 hash of the token.
+- Session cookie outside development: `__Host-session_id` with Secure,
+  HttpOnly, SameSite=Lax, Path=/, and no Domain. Development runs on plain
+  HTTP, so it uses `session_id` without Secure. The DB stores only the
+  SHA-256 hash of the token. A user keeps at most 10 sessions.
 - CSRF is `http.CrossOriginProtection` (stdlib) in the middleware chain —
   no hidden form tokens. Do not remove it when adding routes.
 - The login handlers live in `internal/user` (they need `user.Service`);
@@ -164,17 +181,24 @@ Progressive enhancement — every flow must work without JavaScript:
 ## Server Lifecycle (`cmd/api`)
 
 - `main` stays trivial; `run(ctx, args, getenv, stdout)` owns startup and
-  takes its environment as arguments so tests can call it.
-- Validate command names and argument counts before any database work.
+  takes its environment as arguments so tests can call it. `run` picks the
+  log format: text in development, JSON otherwise. `serve` owns the HTTP
+  servers.
+- `parseCommand` is the single list of subcommands. It checks command
+  names and argument counts before any configuration or database work.
   Subcommands: `migrate` applies migrations and exits; `adduser <email>
   <name>` creates an account with a generated password and prints it once
   to stdout. An unknown subcommand is an error — never fall through to
-  serving.
+  serving. Add a subcommand as one more case in `parseCommand`.
 - `http.Server` always sets `ReadHeaderTimeout`, `ReadTimeout`,
   `WriteTimeout`, `IdleTimeout`. Graceful shutdown drains with its own
   fresh 10s context.
 - Migrations run on startup (idempotent) under an advisory lock, so
   parallel replicas can boot safely.
+- `DEBUG_ADDR` starts a second listener with pprof and expvar
+  (`cmd/api/debug.go`). `Config.Validate` accepts only a loopback address.
+  The listener opens before the main server starts, so a bad address stops
+  the startup.
 
 ## Explicit Exceptions
 
@@ -183,8 +207,8 @@ Progressive enhancement — every flow must work without JavaScript:
   ErrNotFound; SQL still enforces ownership.
 - Login uses a plain form and a full 401 page. Profile and note forms use
   htmx. Do not treat the terminal error page as a fragment for a form.
-- CSRF rejections use the stdlib 403 response. Health checks and missing
-  static assets also use stdlib responses. The unified error contract
+- CSRF rejections use the stdlib 403 response. Probes and missing static
+  assets also use stdlib responses. The unified error contract
   applies to feature handlers and recoverable panics before a response.
 - auth.Service includes the cookie adapter. It is specific to browser
   sessions; feature business services remain independent of HTTP.

@@ -25,8 +25,14 @@ purpose.
   session.
 - SQL enforces expiry (`expires_at > now()` in the session query,
   `internal/auth/postgres.go`). Do not check expiry in Go alone.
-- The cookie flags are fixed: `HttpOnly`, `SameSite=Lax`, `Path=/`, and
-  `Secure` outside development. Do not weaken them.
+- The cookie flags are fixed. Outside development the cookie is
+  `__Host-session_id` with `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`,
+  and no `Domain`. The browser then refuses the cookie over plain HTTP and
+  refuses a copy that a subdomain sets. Development runs on plain HTTP, so
+  it uses `session_id` without `Secure`. Do not weaken these flags.
+- A user keeps at most `maxSessionsPerUser` (10) sessions. `auth.Repo.Insert`
+  removes the oldest sessions in the same transaction as the insert, so
+  logins cannot fill the table.
 - Accept the session token only from the cookie — never from a query
   parameter, a header, or a form field.
 
@@ -78,7 +84,10 @@ purpose.
   `Content-Security-Policy: default-src 'self'; img-src 'self' data:;
   frame-ancestors 'none'; form-action 'self'; base-uri 'self'`,
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, and
-  `Referrer-Policy: same-origin`. Never remove or weaken it.
+  `Referrer-Policy: same-origin`. Outside development it also sets
+  `Strict-Transport-Security: max-age=31536000`. HSTS has no
+  `includeSubDomains`, because the template does not know the other
+  hosts of the domain. Never remove or weaken these headers.
 - The CSP works because every asset is self-hosted and embedded. Keep it
   that way: no CDN tags, no inline `<script>`, no inline `style=`
   attributes in templates. If you must extend the CSP, add the narrowest
@@ -86,8 +95,39 @@ purpose.
 - `http.MaxBytesHandler` caps request bodies at `maxRequestBytes`
   (`internal/app/app.go`). Raise the constant consciously when a feature
   needs bigger uploads; never remove the cap.
-- The regression tests for headers, the body cap, and CSRF live in
-  `internal/app/app_test.go` — extend them, never delete them.
+- The regression tests for headers, the body cap, CSRF, and the unified
+  errors live in `internal/app/security_test.go`. The cookie flag and
+  login rate limit tests live in `internal/app/auth_test.go`. Extend these
+  tests; never delete them.
+
+## Rate Limits
+
+- `POST /login` has a rate limit (`web.RateLimiter`, set up in
+  `internal/app/app.go`). Each client gets a burst of 10 attempts, then
+  one attempt per 20 seconds. A limited request gets 429 with
+  `Retry-After` and does not compute a hash. This stops brute force and
+  the CPU cost of PBKDF2 floods.
+- The key is the client IP address. For IPv6 the key is the /64 prefix,
+  because one client usually controls a full /64 network.
+- Behind a reverse proxy, set `CLIENT_IP_HEADER` (for example
+  `X-Forwarded-For`). The limiter uses the last address in that header,
+  which the proxy adds. Do not set it without a proxy: the client then
+  sends the header and chooses its own key.
+- The state is in process memory. Each replica counts on its own, and a
+  restart clears the counters. The table holds at most 100,000 keys. When
+  it is full, new clients get 429 until idle keys expire (fail closed).
+- There is no limit per account. Such a limit lets any person lock out any
+  account. Add one only with a plan for that risk.
+- Put a new limiter on each endpoint that is expensive or that guesses a
+  secret. Construct it in `app.New` and pass it to `Routes`.
+
+## Debug Listener
+
+- `DEBUG_ADDR` starts pprof and expvar on a second listener
+  (`cmd/api/debug.go`). `Config.Validate` accepts only a loopback address
+  (`localhost` or a loopback IP such as `127.0.0.1` or `[::1]`). The profiles show memory contents
+  and internal state, so never expose this listener through the proxy or a
+  published container port. Reach it with `kubectl port-forward` or SSH.
 
 ## Authorization
 
@@ -127,14 +167,19 @@ purpose.
 The template omits these on purpose (they are deployment-specific). Add
 them before you expose the app publicly:
 
-- **Rate limiting on `POST /login`.** Without it the endpoint allows
-  brute force, and each attempt costs the server a full PBKDF2 hash —
-  a cheap CPU denial of service.
-- **TLS in front of the app** (proxy or load balancer) plus HSTS there.
-  With TLS in place, rename the cookie to use the `__Host-` prefix.
-- **A session cap per user.** Every login adds a session row.
-  SQL rejects it after the 7-day TTL. TTL does not remove rows. Each login
-  attempts to remove at most 100 expired rows. Use a scheduled cleanup if
-  the application must remove old sessions without further logins.
-- **Observability beyond logs**: a localhost-only pprof listener,
-  metrics, tracing — pick what the deployment needs.
+- **TLS termination** at a proxy or a load balancer. The app sends HSTS
+  and a `Secure` cookie outside development, so it works only over HTTPS.
+  Set `CLIENT_IP_HEADER` for that proxy.
+- **Limits for many replicas.** The login limit is per process. With many
+  replicas, or for limits per account, move the counters to a shared store
+  (PostgreSQL or the proxy).
+- **Limits on other endpoints.** Only `POST /login` has a limit in the
+  app. Add a general request limit at the proxy.
+- **Scheduled session cleanup.** SQL rejects a session after the 7-day
+  TTL, but the TTL does not remove rows. Each login removes at most 100
+  expired rows. Use a scheduled job if the table must stay small without
+  logins.
+- **Metrics and tracing.** The app has structured logs, probes, and a
+  loopback pprof/expvar listener. Add metrics and tracing as the
+  deployment needs them.
+- **Backups, secret management, and monitoring of the database.**

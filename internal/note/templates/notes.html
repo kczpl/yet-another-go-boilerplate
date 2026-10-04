@@ -14,7 +14,6 @@
 {{define "notes-section"}}
 <section id="notes-section" class="card">
   <h2>My notes</h2>
-  <p class="muted">Showing up to 100 recent notes.</p>
   {{with .Error}}<p class="notice error">{{.}}</p>{{end}}
 
   {{if .Notes}}
@@ -28,13 +27,24 @@
             hx-post="/notes/{{.ID}}/delete"
             hx-target="#notes-section" hx-swap="outerHTML"
             hx-confirm="Remove this note?">
+        {{/* The cursor keeps the user on this page after the delete. */}}
+        {{with $.After}}<input type="hidden" name="after" value="{{.}}">{{end}}
         <button type="submit" class="danger">Remove</button>
       </form>
     </li>
     {{end}}
   </ul>
   {{else}}
-  <p class="empty muted">No notes yet.</p>
+  <p class="empty muted">{{if .After}}No older notes.{{else}}No notes yet.{{end}}</p>
+  {{end}}
+
+  {{/* Plain links: a page of notes has its own URL, so reload and the
+       back button work. On /me, a link opens the full /notes page. */}}
+  {{if or .After .Older}}
+  <nav class="pager" aria-label="Note pages">
+    {{if .After}}<a href="/notes">← Newest notes</a>{{end}}
+    {{with .Older}}<a class="older" href="/notes?after={{.}}">Older notes →</a>{{end}}
+  </nav>
   {{end}}
 
   <form class="note-form" method="post" action="/notes"

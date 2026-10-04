@@ -17,28 +17,31 @@ embedded migrations, `log/slog`, and tests against a **real PostgreSQL** —
 no frameworks, no ORM, no DI container, no mocks.
 
 **One direct dependency: pgx.** Sessions, password hashing (PBKDF2), CSRF
-protection, templates, and migrations all come from the standard library.
+protection, the login rate limit, templates, and migrations all come from
+the standard library. The app requires Go 1.26.8 or newer; go.mod and the
+Dockerfile pin the same patch version.
 
 Built on two references:
 
 - [How I write HTTP services in Go after 13 years](https://grafana.com/blog/how-i-write-http-services-in-go-after-13-years/) (Mat Ryer) — `run()`, handler makers, explicit wiring
-- [spf13/go-skills](https://github.com/spf13/go-skills) — feature packages instead of layer packages, stdlib-first, vendored into `.claude/skills/` ([why Go fits agentic coding](https://spf13.com/p/go-the-agentic-language/))
+- [spf13/go-skills](https://github.com/spf13/go-skills) — feature packages instead of layer packages, stdlib-first, vendored into `.agents/skills/` ([why Go fits agentic coding](https://spf13.com/p/go-the-agentic-language/))
 
 ## Layout
 
 ```
-cmd/api/            main: config → pool → migrate → app.New → server; subcommands: migrate, adduser
+cmd/api/            main: config → pool → migrate → app.New → server; subcommands: migrate, adduser;
+                    optional loopback pprof/expvar listener (DEBUG_ADDR)
 migrations/         embedded SQL migrations, applied on startup (append-only; new files are timestamp-named)
 internal/
   platform/         shared infrastructure — features import it, it imports no feature
     config/         env-driven configuration
     database/       pgx pool (SQL traces at debug) + embedded SQL migrator
     logging/        slog construction + context-carried log attributes
-    web/            layout, template rendering, static assets, middleware
+    web/            layout, template rendering, static assets, middleware, rate limiter
   app/              composition: wires every feature into one http.Handler
   auth/             sessions: cookie ↔ hashed token in DB, LoadIdentity/RequireIdentity
   user/             example feature: login, /me profile
-  note/             example feature: CRUD list — the one to copy
+  note/             example feature: CRUD list with keyset pages — the one to copy
   testdb/           per-test isolated databases, cloned from a migrated template
 ```
 
@@ -49,7 +52,7 @@ never as layer packages.
 ```
 internal/note/
   note.go           types, sentinel errors, ValidationError
-  service.go        business rules (ownership, validation)
+  service.go        business rules (ownership, validation, page size)
   repository.go     Repository interface — defined next to its consumer
   postgres.go       Repo implementation, plain SQL
   http.go           Routes(mux, ...) + handlers
@@ -81,20 +84,19 @@ There is no register page — `just adduser` (a thin CLI wrapper around
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | GET | `/` | – | redirects to `/me`, or to `/login` when logged out |
-| GET | `/healthz` | – | liveness + DB ping |
-| GET/POST | `/login` | – | redirects to `/me` when logged in |
+| GET | `/livez` | – | liveness: the process answers; no DB, not logged |
+| GET | `/readyz` | – | readiness: DB ping (2s), 503 on failure; not logged |
+| GET/POST | `/login` | – | redirects to `/me` when logged in; POST is rate limited |
 | POST | `/logout` | – | idempotent |
 | GET/POST | `/me` | session | dashboard: profile + embedded notes section |
-| GET/POST | `/notes` | session | list + add (fragment for htmx, page otherwise) |
-| POST | `/notes/{id}/delete` | session | owner-scoped; plain form, upgraded by htmx |
+| GET/POST | `/notes` | session | list + add (fragment for htmx, page otherwise); `?after=<cursor>` shows older notes |
+| POST | `/notes/{id}/delete` | session | owner-scoped; keeps the current page; plain form, upgraded by htmx |
 | GET | `/static/*` | – | embedded htmx + CSS |
 
 ## Frontend
 
 - htmx 2 is vendored into `internal/platform/web/static/` and embedded into
   the binary. There is no npm, no bundler, no build step.
-- The app requires Go 1.26.8 or newer. go.mod and Dockerfile pin the same
-  supported patch version.
 - Every form is a plain HTML form first; htmx attributes upgrade it. With
   JavaScript disabled, handlers answer with redirects (POST → redirect → GET)
   and full pages. Even delete is a real form (`POST /notes/{id}/delete`) —
@@ -117,11 +119,16 @@ There is no register page — `just adduser` (a thin CLI wrapper around
 
 ## Auth
 
-- Login stores a 43-character random token in a `session_id` cookie
-  (`HttpOnly`, `SameSite=Lax`, `Secure` outside development).
+- Login stores a 43-character random token in a `__Host-session_id` cookie
+  (`Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/`). Development runs on
+  plain HTTP and uses `session_id` without `Secure`.
 - The database stores only the SHA-256 hash of the token; expiry is enforced
-  in SQL. Each login attempts a bounded cleanup of expired rows. A database
-  failure returns 500 and preserves the session cookie.
+  in SQL. A user keeps at most 10 sessions: a new login removes the oldest
+  in the same transaction. Each login also removes up to 100 expired rows.
+  A database failure returns 500 and preserves the session cookie.
+- `POST /login` has a per-IP rate limit (a burst of 10, then one attempt
+  per 20s; 429 with `Retry-After`). Behind a proxy, set `CLIENT_IP_HEADER`.
+  The counters live in process memory, one set per replica.
 - Passwords are hashed with stdlib PBKDF2-HMAC-SHA256 (600k iterations) in a
   self-describing format, so the cost can be raised later. New passwords
   require at least 8 Unicode characters and at most 512 bytes; login enforces
@@ -130,12 +137,28 @@ There is no register page — `just adduser` (a thin CLI wrapper around
   requests via `Sec-Fetch-Site`, with an `Origin` fallback — no tokens needed.
 - Every response carries security headers (a strict CSP — possible because
   all assets are self-hosted — plus `nosniff`, `X-Frame-Options`,
-  `Referrer-Policy`), and `http.MaxBytesHandler` caps request bodies.
+  `Referrer-Policy`, and HSTS outside development), and
+  `http.MaxBytesHandler` caps request bodies.
+
+## Configuration
+
+All settings come from the environment (`config.Load`). `Config.Validate`
+stops the startup on a bad value.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ENVIRONMENT` | `production` | `development`, `staging`, or `production`. Unset means production: `DATABASE_URL` is required, the cookie is `Secure`, and HSTS is on. The `just` host recipes default to `development`. |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`. `debug` also logs every SQL query. |
+| `HOST` / `PORT` | `localhost` / `8080` | The bind address. The Docker image sets `HOST=0.0.0.0`. |
+| `DATABASE_URL` | – (development: local) | Each connection gets `statement_timeout=5s`; add `?statement_timeout=…` to change it. |
+| `CLIENT_IP_HEADER` | – | The header in which a trusted proxy sends the client address (`X-Forwarded-For`). The rate limit uses its last address. Leave it empty without a proxy. |
+| `DEBUG_ADDR` | – | A loopback `host:port` for pprof and expvar (`localhost:6060`). Never expose it. |
 
 ## Logging
 
 One `slog.Logger` for the whole application, built by `logging.New` (text in
-development, JSON otherwise) and passed down explicitly — no globals.
+development, JSON otherwise) and passed down explicitly — no globals. The
+request log skips the `/livez` and `/readyz` probes.
 Middleware stores correlation attributes in the request context:
 
 - `web.LogRequests` adds `request_id` (reused from `X-Request-ID`, echoed
@@ -163,9 +186,11 @@ Every test calls `testdb.New(t)` and gets a **private database** cloned from
 a migrated template (`CREATE DATABASE ... TEMPLATE`, a few ms) — full
 isolation, commits allowed, `t.Parallel()` safe, dropped on cleanup. HTTP
 tests drive the complete `app.New` handler (middleware + sessions + CSRF
-included) and assert on rendered HTML; they also pin the security
-behavior — CSRF rejection, response headers, the body cap, the unified 404.
-The race detector is always on.
+included) with the production configuration and assert on rendered HTML.
+`internal/app` has one test file per area (`auth_test.go`,
+`notes_test.go`, `security_test.go`, ...); a new feature adds its own.
+`security_test.go` pins the security behavior — CSRF rejection, response
+headers, the body cap, the unified 404. The race detector is always on.
 
 ## Commands
 
@@ -192,8 +217,8 @@ disposable; the application database keeps its persistent volume.
 
 ## Working with AI agents
 
-`CLAUDE.md` + path-scoped rules in `.claude/rules/` + vendored
-[spf13/go-skills](https://github.com/spf13/go-skills) in `.claude/skills/`
+`AGENTS.md` + path-scoped rules in `.agents/rules/` + vendored
+[spf13/go-skills](https://github.com/spf13/go-skills) in `.agents/skills/`
 give coding agents the project conventions up front. Local rules take
 precedence over the generic skill where they differ. Agents must read the
 relevant rules; path-based auto-loading depends on the agent tool. The codebase is
@@ -201,9 +226,12 @@ deliberately explicit and denormalized — every query written out, every
 dependency injected by hand — so agents (and humans) can read any file in
 isolation.
 
-The rules in `.claude/rules/` are the canonical convention reference —
-this README and `CLAUDE.md` only summarize them. `AGENTS.md` is a symlink
-to `CLAUDE.md` for tools that look for that name.
+The rules in `.agents/rules/` are the canonical convention reference —
+this README and `AGENTS.md` only summarize them. Claude Code reads
+`CLAUDE.md` and `.claude/`, so `CLAUDE.md`, `.claude/rules`, and
+`.claude/skills` are symlinks to the `AGENTS.md` and `.agents/` files.
+`.claude/settings.json` stays a regular file because it is Claude Code
+configuration.
 
 ## Renaming
 
@@ -217,12 +245,22 @@ grep -rl 'github.com/kczpl/yet-another-go-boilerplate' --include='*.go' . \
 
 ## Scope and production setup
 
-The note example shows the latest 100 rows. Add keyset pagination when a
-product needs to browse all notes. The template deliberately has no public
-registration, password reset, workers, ORM, or generic unit of work.
+The template deliberately has no public registration, password reset,
+workers, ORM, or generic unit of work.
 
-Before public deployment, configure login rate limits and TLS/HSTS at the
-edge, and decide on session caps, session cleanup, and backups. Expiry blocks
-access but does not remove a row by itself. The migrator records filenames
-and requires append-only review; it does not verify applied file checksums.
-See `.claude/rules/security.md` and [the review report](docs/review.md).
+The app already has a login rate limit, a per-user session cap, HSTS, the
+`__Host-` cookie, liveness and readiness probes, a statement timeout, and
+an optional loopback pprof listener. Before public deployment, add these at
+the edge or in the deployment:
+
+- TLS termination at a proxy, with `CLIENT_IP_HEADER` set for it. Outside
+  development the app works only over HTTPS.
+- A shared or per-account rate limit when you run many replicas, and a
+  general request limit at the proxy.
+- A scheduled session cleanup if the table must stay small without logins.
+  Expiry blocks access but does not remove a row by itself.
+- Metrics, tracing, backups, and secret management.
+
+The migrator records filenames and requires append-only review; it does not
+verify applied file checksums. See `.agents/rules/security.md` and
+[the review report](docs/review.md).

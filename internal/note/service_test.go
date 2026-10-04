@@ -3,6 +3,7 @@ package note_test
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -50,9 +51,12 @@ func TestAddAndList(t *testing.T) {
 		t.Fatalf("Add second note: %v", err)
 	}
 
-	notes, err := svc.List(t.Context(), owner)
+	notes, next, err := svc.List(t.Context(), owner, note.Cursor{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
+	}
+	if !next.IsZero() {
+		t.Errorf("next = %+v, want zero: one page holds all notes", next)
 	}
 	if len(notes) != 2 {
 		t.Fatalf("List returned %d notes, want 2", len(notes))
@@ -115,7 +119,7 @@ func TestDeleteEnforcesOwnership(t *testing.T) {
 		t.Errorf("second Delete = %v, want ErrNotFound", err)
 	}
 
-	notes, err := svc.List(t.Context(), alice)
+	notes, _, err := svc.List(t.Context(), alice, note.Cursor{})
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -124,32 +128,72 @@ func TestDeleteEnforcesOwnership(t *testing.T) {
 	}
 }
 
-func TestListLimitsRowsAndScopesOwner(t *testing.T) {
+// pageSize in service.go is 20.
+const pageSize = 20
+
+func TestListPagesByKeyset(t *testing.T) {
 	t.Parallel()
 	pool := testdb.New(t)
 	svc := note.NewService(note.NewRepo(pool))
 	owner := seedUser(t, pool)
 	other := seedUser(t, pool)
-	_, err := pool.Exec(t.Context(), `INSERT INTO notes (user_id, text) SELECT $1, n::text FROM generate_series(1, 101) n`, owner)
+	// All rows get the same created_at, so only the id orders them. This
+	// is the hard case for a keyset cursor.
+	_, err := pool.Exec(t.Context(), `
+		INSERT INTO notes (user_id, text, created_at)
+		SELECT $1, n::text, '2026-01-01T12:00:00Z' FROM generate_series(1, 45) n`, owner)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Add(t.Context(), other, "private note"); err != nil {
 		t.Fatal(err)
 	}
-	notes, err := svc.List(t.Context(), owner)
+
+	var all []note.Note
+	var sizes []int
+	after := note.Cursor{}
+	for {
+		page, next, err := svc.List(t.Context(), owner, after)
+		if err != nil {
+			t.Fatalf("List after %+v: %v", after, err)
+		}
+		all = append(all, page...)
+		sizes = append(sizes, len(page))
+		if next.IsZero() {
+			break
+		}
+		after = next
+	}
+
+	if !slices.Equal(sizes, []int{pageSize, pageSize, 5}) {
+		t.Fatalf("page sizes = %v, want [%d %d 5]", sizes, pageSize, pageSize)
+	}
+	for i, n := range all {
+		if n.UserID != owner {
+			t.Fatal("a page contains a note of another user")
+		}
+		if i > 0 && all[i-1].ID <= n.ID {
+			t.Fatalf("note %d is not older than note %d: a row is missing, repeated, or out of order", i, i-1)
+		}
+	}
+}
+
+func TestListLastPageHasNoCursor(t *testing.T) {
+	t.Parallel()
+	pool := testdb.New(t)
+	svc := note.NewService(note.NewRepo(pool))
+	owner := seedUser(t, pool)
+	// Exactly one full page: the extra row must not produce an empty
+	// second page.
+	_, err := pool.Exec(t.Context(), `INSERT INTO notes (user_id, text) SELECT $1, n::text FROM generate_series(1, $2::int) n`, owner, pageSize)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(notes) != 100 {
-		t.Fatalf("got %d notes, want 100", len(notes))
+	notes, next, err := svc.List(t.Context(), owner, note.Cursor{})
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i, n := range notes {
-		if n.UserID != owner {
-			t.Fatal("list contains another user's note")
-		}
-		if i > 0 && notes[i-1].ID <= n.ID {
-			t.Fatal("rows with equal timestamps are not ordered by descending ID")
-		}
+	if len(notes) != pageSize || !next.IsZero() {
+		t.Fatalf("List = %d notes, next %+v; want %d notes and no next page", len(notes), next, pageSize)
 	}
 }

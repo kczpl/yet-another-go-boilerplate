@@ -33,16 +33,30 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
 
 ## What to Test Where
 
-- `internal/app/app_test.go` — user-visible flows through the **full
+- `internal/app/*_test.go` — user-visible flows through the **full
   handler**: build it with `app.New` exactly as `cmd/api` does (middleware +
   sessions + CSRF + routes), drive it with `httptest`, assert on status
   codes, redirects, and rendered HTML. Test both paths for every mutation:
   htmx (fragment swap) and the plain form (redirect / full page) —
-  including delete (`POST /notes/{id}/delete`).
-- The security invariants have regression tests in `app_test.go`: CSRF
-  rejection, the security headers, the request body cap, and the unified
-  404 (HTML and JSON). When you change the middleware chain or the error
-  path, extend these tests — do not delete them to make a change pass.
+  including delete (`POST /notes/{id}/delete`). The files:
+  - `client_test.go` — the test client and the shared helpers (`newClient`,
+    `register`, `postForm`, `wantStatus`, `wantContains`, `wantLocation`).
+  - `auth_test.go` — login, logout, the session cookie flags, the login
+    rate limit, and the guard.
+  - `profile_test.go`, `notes_test.go` — one file per feature. A new
+    feature adds `internal/app/<name>_test.go`.
+  - `health_test.go` — the probes and the static assets.
+  - `security_test.go` — the security invariants.
+- `newClient` loads the production config (an empty environment), so the
+  tests see the `__Host-` cookie and HSTS exactly as a deployment does.
+  The test client carries the cookie itself and ignores the `Secure`
+  flag, so the flows still work over plain HTTP.
+- The security invariants have regression tests in `security_test.go`:
+  CSRF rejection, the security headers (HSTS included), `no-store` on
+  private pages, the request body cap, and the unified 404 (HTML and
+  JSON). The cookie flags and the login rate limit have tests in
+  `auth_test.go`. When you change the middleware chain or the error path,
+  extend these tests — do not delete them to make a change pass.
 - `internal/<feature>/service_test.go` — business logic + SQL against a real
   database. Service tests exercise the repo; don't duplicate them with
   repo-only tests unless a query has behavior the service doesn't reach.
@@ -72,7 +86,9 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   and vulncheck) on main pushes and pull requests, then builds the Docker
   image. `just test` passes extra arguments safely and disables result
   caching so database tests run on every invocation.
-- Keep migration tests for rollback, parallel calls, late files, and
-  cancellation. Keep HTTP tests for database failures and htmx cache headers.
+- Keep migration tests for rollback, parallel calls, late files,
+  cancellation, and the statement timeout (a migration that runs longer
+  than the pool's `statement_timeout` must still succeed). Keep HTTP tests
+  for database failures, the probes, and htmx cache headers.
 - Browser verification complements httptest. HTTP tests cannot detect CSP
   violations or a broken DOM swap. Use a browser when the htmx flow changes.

@@ -27,10 +27,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, fsys fs.FS) error {
 	}
 	defer conn.Release()
 
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrateLockID); err != nil {
+	// Register the release first. If the lock call fails after the server
+	// granted the lock, the release still removes it.
+	defer releaseMigrationLock(conn)
+	if err := acquireMigrationLock(ctx, conn); err != nil {
 		return fmt.Errorf("acquiring migration lock: %w", err)
 	}
-	defer releaseMigrationLock(conn)
 
 	files, err := fs.Glob(fsys, "*.sql")
 	if err != nil {
@@ -60,6 +62,12 @@ func applyMigration(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, file st
 		return fmt.Errorf("reading migration: %w", err)
 	}
 	return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+		// A migration can run longer than the pool's statement timeout,
+		// for example when it builds an index. SET LOCAL ends with the
+		// transaction.
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = 0"); err != nil {
+			return err
+		}
 		// Exec without arguments uses the simple protocol.
 		if _, err := tx.Exec(ctx, string(sql)); err != nil {
 			return err
@@ -69,6 +77,23 @@ func applyMigration(ctx context.Context, conn *pgxpool.Conn, fsys fs.FS, file st
 	})
 }
 
+// acquireMigrationLock waits for the session-scoped advisory lock. Another
+// migrator can hold the lock for the whole length of its migrations, so the
+// wait has no statement timeout. SET LOCAL ends with the transaction. The
+// session lock stays after the commit.
+func acquireMigrationLock(ctx context.Context, conn *pgxpool.Conn) error {
+	return pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, "SET LOCAL statement_timeout = 0"); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, "SELECT pg_advisory_lock($1)", migrateLockID)
+		return err
+	})
+}
+
+// releaseMigrationLock removes the advisory lock. If the unlock fails, or
+// the session does not hold the lock, it closes the connection: the server
+// then drops every lock of the session.
 func releaseMigrationLock(conn *pgxpool.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

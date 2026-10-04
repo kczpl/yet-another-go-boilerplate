@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -11,15 +12,35 @@ func getenvFrom(env map[string]string) func(string) string {
 	return func(key string) string { return env[key] }
 }
 
-func TestLoadDevelopmentDefaults(t *testing.T) {
+// devEnv returns a development environment plus the extra variables.
+func devEnv(extra map[string]string) func(string) string {
+	env := map[string]string{"ENVIRONMENT": "development"}
+	maps.Copy(env, extra)
+	return getenvFrom(env)
+}
+
+func TestLoadDefaultsToProduction(t *testing.T) {
 	t.Parallel()
 	cfg := config.Load(getenvFrom(nil))
 
-	if cfg.Env != "development" {
-		t.Errorf("Env = %q, want development", cfg.Env)
+	if cfg.Env != "production" {
+		t.Errorf("Env = %q, want production — a missing ENVIRONMENT must fail closed", cfg.Env)
 	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "DATABASE_URL") {
+		t.Fatalf("Validate = %v, want a DATABASE_URL error for an empty environment", err)
+	}
+}
+
+func TestLoadDevelopmentDefaults(t *testing.T) {
+	t.Parallel()
+	cfg := config.Load(devEnv(nil))
+
 	if cfg.DatabaseURL == "" {
 		t.Error("DatabaseURL default missing in development")
+	}
+	if cfg.Addr() != "localhost:8080" {
+		t.Errorf("Addr = %q, want localhost:8080", cfg.Addr())
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Errorf("Validate: %v, want nil — development runs on defaults", err)
@@ -70,7 +91,7 @@ func TestLogLevel(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := config.Load(getenvFrom(map[string]string{"LOG_LEVEL": tt.value}))
+			cfg := config.Load(devEnv(map[string]string{"LOG_LEVEL": tt.value}))
 			err := cfg.Validate()
 			if tt.wantErr {
 				if err == nil || !strings.Contains(err.Error(), "LOG_LEVEL") {
@@ -89,9 +110,42 @@ func TestValidatePort(t *testing.T) {
 	t.Parallel()
 	for _, port := range []string{"abc", "0", "-1", "65536"} {
 		t.Run(port, func(t *testing.T) {
-			cfg := config.Load(getenvFrom(map[string]string{"PORT": port}))
+			cfg := config.Load(devEnv(map[string]string{"PORT": port}))
 			if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "PORT") {
 				t.Fatalf("Validate = %v, want a PORT error", err)
+			}
+		})
+	}
+}
+
+func TestValidateDebugAddr(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		addr    string
+		wantErr bool
+	}{
+		{"", false},
+		{"localhost:6060", false},
+		{"127.0.0.1:6060", false},
+		{"[::1]:6060", false},
+		{"0.0.0.0:6060", true},
+		{":6060", true},
+		{"10.0.0.5:6060", true},
+		{"localhost", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.addr, func(t *testing.T) {
+			cfg := config.Load(devEnv(map[string]string{"DEBUG_ADDR": tt.addr}))
+			err := cfg.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "DEBUG_ADDR") {
+					t.Fatalf("Validate = %v, want a DEBUG_ADDR error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate: %v, want nil", err)
 			}
 		})
 	}

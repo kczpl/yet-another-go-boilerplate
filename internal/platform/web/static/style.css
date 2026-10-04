@@ -83,7 +83,6 @@ a:hover { color: var(--muted); }
 /* ---------- forms ---------- */
 
 form { display: grid; gap: 1.25rem; }
-nav form { display: contents; }
 form > button { justify-self: start; }
 .auth form > button, .note-form > button { justify-self: stretch; }
 
@@ -208,6 +207,11 @@ ul.notes button { padding: 0.25rem 0.6rem; font-size: 0.6875rem; }
 /* The delete form wraps one button. Neutralize the form-grid gap and any
    margin, so the button sits flush in the flex row. */
 ul.notes li form { margin: 0; gap: 0; }
+
+/* The pager is a nav, so it removes the padding and border of the top
+   nav. The older link stays on the right, also without a newer link. */
+nav.pager { padding: 0; margin: 0 0 1.5rem; border: 0; font-size: 0.875rem; }
+nav.pager .older { margin-left: auto; }
 
 /* Keep the line breaks of the note. Wrap long words. */
 .note-text {

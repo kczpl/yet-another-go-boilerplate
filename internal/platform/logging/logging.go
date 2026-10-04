@@ -9,17 +9,24 @@ import (
 	"io"
 	"log/slog"
 	"slices"
-
-	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/config"
 )
 
-// New builds the application logger: text in development, JSON otherwise.
-// This is the only constructor of a logger. Everything else receives it as
-// a parameter.
-func New(w io.Writer, cfg config.Config) *slog.Logger {
-	opts := &slog.HandlerOptions{Level: cfg.LogLevel}
+// Format selects the record encoding.
+type Format int
+
+const (
+	// JSON is the format for log collectors. Use it outside development.
+	JSON Format = iota
+	// Text is the format for a developer terminal.
+	Text
+)
+
+// New builds the application logger. This is the only constructor of a
+// logger. Everything else receives it as a parameter.
+func New(w io.Writer, level slog.Level, format Format) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: level}
 	var handler slog.Handler
-	if cfg.Development() {
+	if format == Text {
 		handler = slog.NewTextHandler(w, opts)
 	} else {
 		handler = slog.NewJSONHandler(w, opts)

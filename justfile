@@ -12,13 +12,15 @@ default:
 compose:
   docker compose up --build api postgres
 
-# Run the API on the host. Start PostgreSQL first.
+# Run the API on the host. Start PostgreSQL first. The host recipes use
+# ENVIRONMENT=development when .env and the shell do not set it, because
+# the app defaults to production.
 app:
-  go run ./cmd/api
+  ENVIRONMENT="${ENVIRONMENT:-development}" go run ./cmd/api
 
 # Build the production binary.
 build:
-  CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/api ./cmd/api
+  CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o bin/api ./cmd/api
 
 # Format the code.
 fmt:
@@ -47,11 +49,11 @@ ci: lint types complexity test vulncheck
 
 # Apply the migrations. App startup also applies them.
 migrate:
-  go run ./cmd/api migrate
+  ENVIRONMENT="${ENVIRONMENT:-development}" go run ./cmd/api migrate
 
 # Create an account and print its generated password.
 adduser email name:
-  go run ./cmd/api adduser "$1" "$2"
+  ENVIRONMENT="${ENVIRONMENT:-development}" go run ./cmd/api adduser "$1" "$2"
 
 # Create a migration file. Use a name such as create_toys_table.
 makemigration name:

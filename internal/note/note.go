@@ -30,3 +30,14 @@ type Note struct {
 	CreatedAt time.Time `db:"created_at"`
 	UpdatedAt time.Time `db:"updated_at"`
 }
+
+// Cursor is a position in a list of notes, newest first. A page that
+// starts after a Cursor holds only older notes. The ID breaks ties between
+// notes with the same CreatedAt.
+type Cursor struct {
+	CreatedAt time.Time
+	ID        string
+}
+
+// IsZero reports whether c is the start of the list.
+func (c Cursor) IsZero() bool { return c.ID == "" }

@@ -17,7 +17,8 @@ import (
 var passwordPattern = regexp.MustCompile(`temporary password \(shown once\): ([A-Za-z0-9_-]{24})`)
 
 // testEnv builds a getenv that points run at the database of this test and
-// keeps every other setting on its development default.
+// keeps every other setting on its default. An unset ENVIRONMENT means
+// production.
 func testEnv(t *testing.T) (func(string) string, *pgxpool.Pool) {
 	t.Helper()
 	pool := testdb.New(t)
