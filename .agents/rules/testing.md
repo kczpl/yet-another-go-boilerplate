@@ -62,8 +62,11 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
     `TestChatOutlivesWriteTimeout` runs the full handler
     on a real server with a short `WriteTimeout`, because only a real
     connection has a write deadline.
-  - `models_test.go` — `app.NewModels`: both default models answer, and a
-    model of a provider without its key stops startup.
+  - `models_test.go` — `app.NewModels`: both default models answer, each
+    provider registers with its key or its URL, and a model of a provider
+    without its key stops startup.
+  - `worker_test.go` — `app.NewWorker` as `cmd/api worker` wires it: the
+    hourly schedule enqueues the session cleanup, and the cleanup runs.
   - `health_test.go` — the probes and the static assets.
   - `security_test.go` — the security invariants.
 - `newClient` loads the production config (an empty environment), so the
@@ -83,10 +86,27 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   its service with a stub `llm.Provider` (or `systemone.Provider`) and no
   database.
 - A provider adapter (`internal/platform/llm/anthropic`,
+  `internal/platform/llm/chatcompletions`,
   `internal/platform/systemone/typesafe`) tests the request mapping, the
   response parsing, and the error path against an `httptest.Server`. An
-  error must not contain the key. `TestNewIgnoresEnvironment` uses
-  `t.Setenv`, so it does not run in parallel.
+  error must not contain the key or the request text.
+  `TestNewIgnoresEnvironment` uses `t.Setenv`, so it does not run in
+  parallel. `TestNewKeepsTheBasePath` checks the Bedrock route
+  (`/anthropic/`).
+- The job queue (`internal/platform/jobs`) tests against a real database.
+  A test drives the worker with `RunDue`: it enqueues the due schedule
+  slots, runs the cleanup, and then runs the due jobs one at a time. A
+  test never waits for a backoff or a lease. It moves `run_at` or
+  `locked_until` with SQL (`makeDue`). `export_test.go` gives the tests
+  `SetClock` (the clock of the schedules), `SetShutdownGrace`, and
+  `CleanupBatch`. Keep the tests of these invariants: many workers run
+  each job once, a stale worker cannot store a result, an expired lease
+  returns the job, the cleanup works in batches, each schedule slot
+  enqueues one job, the logs omit the payload, and a shutdown finishes the
+  running jobs or returns them without the cost of an attempt.
+- A feature with jobs tests the rules in `service_test.go` and the
+  wiring through `app.NewWorker` and `RunDue` in
+  `internal/app/worker_test.go`.
 - Tests never call a live model. The production config of the tests uses
   `fake/echo` (`llm.Fake`, no delay) and `fake/uniform`
   (`systemone.Fake`). To test a failure, pass a stub provider to
@@ -121,6 +141,7 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   and vulncheck) on main pushes and pull requests, then builds the Docker
   image. `just test` passes extra arguments safely and disables result
   caching so database tests run on every invocation.
+- Keep the job queue tests (see What to Test Where).
 - Keep migration tests for rollback, parallel calls, late files,
   cancellation, and the statement timeout (a migration that runs longer
   than the pool's `statement_timeout` must still succeed). Keep HTTP tests

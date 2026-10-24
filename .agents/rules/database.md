@@ -97,6 +97,50 @@ paths:
   they need one atomic operation. The template does not add a generic unit
   of work for a hypothetical future use case.
 
+## Background Jobs
+
+- The tables `jobs` and `job_schedules` belong to
+  `internal/platform/jobs`. Only that package reads and writes them. A
+  feature adds a job only with `jobs.Enqueue`.
+- **Enqueue in the transaction of the write.** When a write must start a
+  job, enqueue the job in the same repository method and the same
+  transaction. A rollback then removes the job too, and the job never
+  sees a row that does not exist:
+
+  ```go
+  // internal/toy/postgres.go
+  err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
+  	// INSERT INTO toys ... RETURNING id
+  	_, err := jobs.Enqueue(ctx, tx, jobs.Params{
+  		Kind:    "toy.send_receipt",
+  		Payload: receipt{ToyID: id},
+  	})
+  	return err
+  })
+  ```
+
+  Both `*pgxpool.Pool` and `pgx.Tx` satisfy `jobs.DB`. A job that does
+  not follow a write is a repository method that calls
+  `jobs.Enqueue(ctx, r.db, ...)`.
+- A job handler that calls a model or another service makes the call
+  first and then writes the result in a short transaction (see
+  Transactions).
+- Each statement of a job still has the 5 s `statement_timeout`. A job
+  that changes many rows works in batches with a `LIMIT`, for example
+  `auth.Service.DeleteExpired` (1000 rows per statement).
+- The worker deletes done jobs after 24 hours and failed jobs after 7
+  days. To run a failed job again, raise `max_attempts`. Never reset
+  `attempts`: the attempt number fences a stale worker.
+
+  ```sql
+  UPDATE jobs
+  SET status = 'queued', run_at = now(), max_attempts = attempts + 1, updated_at = now()
+  WHERE id = @id AND status = 'failed';
+  ```
+
+- To see the state of the queue, run
+  `SELECT kind, status, count(*) FROM jobs GROUP BY kind, status`.
+
 ## Timeouts
 
 - `database.Connect` sets `statement_timeout = 5s` on every pool

@@ -2,7 +2,8 @@
 
 A minimal, feature-based Go web service template: stdlib `net/http`,
 PostgreSQL through pgx, server-rendered HTML with vendored htmx, embedded
-SQL migrations, `log/slog`, and tests against a real database. There are
+SQL migrations, a background job queue on PostgreSQL, `log/slog`, and
+tests against a real database. There are
 no frameworks, no ORM, and no DI container: `internal/app` wires
 everything explicitly.
 
@@ -19,7 +20,8 @@ the details.
   official Anthropic SDK. Only `internal/platform/llm/anthropic` imports
   the SDK. [core.md]
 - Features never import each other. `internal/platform` never imports a
-  feature. Only `internal/app/app.go` wires features. [core.md]
+  feature. Only `internal/app` wires features: `app.go` the routes,
+  `worker.go` the jobs. [core.md]
 - Handlers parse, call the service, and render. Business rules live in
   `service.go`. SQL lives only in `postgres*.go`. A service never opens a
   transaction. [core.md, database.md]
@@ -36,6 +38,10 @@ the details.
 - No inline `<script>`, no inline `style=`, no CDN tag. Never use
   `template.HTML` with user data; model output is user data. [security.md]
 - Only `config.Load` reads the environment. [core.md]
+- A job handler returns when its ctx ends, and a second run of the job is
+  safe. Enqueue a job only with `jobs.Enqueue`, in the transaction of the
+  write. Never put a secret or private text in a payload.
+  [core.md, database.md]
 - Never log a key, a password, a token, a prompt, a state, or an answer.
   [security.md]
 - Tests never call a live model and never mock the database. [testing.md]
@@ -50,6 +56,8 @@ the details.
 | Add a feature | core.md "New Feature Checklist" | copy `internal/note/` |
 | Add a feature that calls a model | core.md "Model Providers" | copy `internal/chat/` (LLM) or `internal/triage/` (System One) |
 | Add a model provider | core.md "Add a Provider" | `internal/platform/llm/anthropic/`, `internal/platform/systemone/typesafe/` |
+| Add an API with the Chat Completions shape | core.md "Add a Provider" | one `chatcompletions.New` in `newLLM` (`internal/app/models.go`) |
+| Add a background or a scheduled job | core.md "Background Jobs" | `internal/auth/jobs.go`, `internal/app/worker.go` |
 | Add or change a route, a handler, a template | http.md | `internal/note/http.go` |
 | Stream a response (SSE) | http.md "Streaming (SSE)" | `internal/chat/http.go`, `internal/platform/web/sse.go` |
 | Change the schema | database.md "Migrations" | `just makemigration <name>` |
@@ -120,19 +128,42 @@ shell comments. Go doc comments still start with the symbol name
 Request flow: `internal/app` (middleware + mux) → `internal/<feature>/http.go`
 → `service.go` → `repository.go` ← `postgres.go`
 
+Job flow: `cmd/api worker` → `app.NewWorker` → `internal/<feature>/jobs.go`
+→ `service.go` → `repository.go` ← `postgres.go`
+
+Job life cycle: one row in `jobs`; only `internal/platform/jobs` writes
+the tables `jobs` and `job_schedules`.
+
+- `jobs.Enqueue` or a schedule slot inserts the row as `queued`.
+- A claim (`FOR UPDATE SKIP LOCKED`, one `UPDATE`) sets `running`, adds 1
+  to `attempts`, and sets the lease `locked_until` (the timeout + 30 s).
+- The handler result sets `done`, `queued` with a backoff (an error), or
+  `failed` (`jobs.Permanent`, or no attempts left). Each result `UPDATE`
+  matches the attempt number, so a stale worker changes nothing.
+- SIGTERM returns a running job to `queued` and gives back its attempt.
+  The cleanup (each minute) returns a job with an expired lease, and
+  deletes `done` after 24 h and `failed` after 7 days.
+- A handler that ignores ctx blocks its claim loop until the process
+  exits. A kind without a handler stays `queued` forever.
+- The rules: core.md "Background Jobs" and database.md "Background Jobs".
+  Monitoring queries and limits: README "Operate the queue".
+
 ```
-cmd/api/          main, run(), subcommands (migrate, adduser), debug listener
+cmd/api/          main, run(), subcommands (migrate, adduser, worker), debug listener
 migrations/       embedded SQL, append-only
 internal/
   platform/       shared infrastructure; imports no feature
     config/       Config, Load(getenv), Validate
     database/     pgx pool + migrator
     logging/      slog + context-carried log attributes
-    llm/          text models: Provider, Router, Fake; anthropic/ (SDK)
+    jobs/         job queue: Enqueue, Worker (Handle, Schedule, Run), retries, leases
+    llm/          text models: Provider, Router, Fake; anthropic/ (SDK),
+                  chatcompletions/ (Mistral, xAI, local servers; net/http)
     systemone/    System One models: Provider, Router, Fake; typesafe/
     web/          templates, errors, middleware, rate limiter, SSE, assets
-  app/            app.New: the only wiring point; models.go: model providers
-  auth/           sessions; knows users only as ids
+  app/            the only wiring point: app.New (routes), NewWorker (jobs);
+                  models.go: model providers
+  auth/           sessions; knows users only as ids; jobs.go: hourly cleanup
   user/           login + the /me dashboard
   note/           list with keyset pages — copy it for a new feature
   chat/           LLM example: streams the answer over SSE (no storage)
@@ -143,8 +174,9 @@ internal/
 ## Commands
 
 ```bash
-just compose         # full stack in Docker (api + postgres)
+just compose         # full stack in Docker (api + worker + postgres)
 just app             # API on the host (needs: docker compose up postgres -d)
+just worker          # the background jobs on the host
 just test            # starts postgres-test, runs go test -race ./...
 just test -run TestNotes   # extra arguments go to go test
 just ci              # lint + types + complexity + test + vulncheck

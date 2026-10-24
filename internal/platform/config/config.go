@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/netip"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -49,7 +50,21 @@ type Config struct {
 	// each key only to the constructor of its provider and registers the
 	// provider only when the key is set. Never log a key.
 	AnthropicAPIKey string
+	MistralAPIKey   string
+	XAIAPIKey       string
 	TypeSafeAPIKey  string
+
+	// BedrockAPIKey and BedrockRegion select Claude on Amazon Bedrock. The
+	// key is a Bedrock API key (AWS_BEARER_TOKEN_BEDROCK in the AWS
+	// documentation). The region selects the endpoint, for example
+	// us-east-1.
+	BedrockAPIKey string
+	BedrockRegion string
+
+	// LocalLLMURL is the address of a local server with the Chat
+	// Completions API, for example http://localhost:11434/v1 for Ollama.
+	// A local server needs no key.
+	LocalLLMURL string
 
 	// logLevelInput keeps the raw LOG_LEVEL value for Validate. A typo
 	// must stop startup, not silently mean info.
@@ -70,7 +85,12 @@ func Load(getenv func(string) string) Config {
 		LLMModel:        cmp.Or(getenv("LLM_MODEL"), "fake/echo"),
 		SystemOneModel:  cmp.Or(getenv("SYSTEMONE_MODEL"), "fake/uniform"),
 		AnthropicAPIKey: getenv("ANTHROPIC_API_KEY"),
+		MistralAPIKey:   getenv("MISTRAL_API_KEY"),
+		XAIAPIKey:       getenv("XAI_API_KEY"),
 		TypeSafeAPIKey:  getenv("TYPESAFE_API_KEY"),
+		BedrockAPIKey:   getenv("BEDROCK_API_KEY"),
+		BedrockRegion:   getenv("BEDROCK_REGION"),
+		LocalLLMURL:     getenv("LOCAL_LLM_URL"),
 		logLevelInput:   getenv("LOG_LEVEL"),
 	}
 	// A development convenience only. Validate keeps the other
@@ -105,13 +125,27 @@ func (c Config) Validate() error {
 	if c.DebugAddr != "" && !isLoopback(c.DebugAddr) {
 		errs = append(errs, fmt.Errorf("DEBUG_ADDR must be a loopback host:port such as localhost:6060, got %q", c.DebugAddr))
 	}
+	errs = append(errs, c.validateModels()...)
+	return errors.Join(errs...)
+}
+
+// validateModels checks the settings of the model providers.
+func (c Config) validateModels() []error {
+	var errs []error
 	if !isModelRef(c.LLMModel) {
 		errs = append(errs, fmt.Errorf("LLM_MODEL must have the form provider/model, got %q", c.LLMModel))
 	}
 	if !isModelRef(c.SystemOneModel) {
 		errs = append(errs, fmt.Errorf("SYSTEMONE_MODEL must have the form provider/model, got %q", c.SystemOneModel))
 	}
-	return errors.Join(errs...)
+	if c.BedrockAPIKey != "" && !isRegion(c.BedrockRegion) {
+		errs = append(errs, fmt.Errorf("BEDROCK_REGION must be an AWS region such as us-east-1 when BEDROCK_API_KEY is set, got %q", c.BedrockRegion))
+	}
+	// The URL can hold a password, so the error does not repeat it.
+	if c.LocalLLMURL != "" && !isHTTPURL(c.LocalLLMURL) {
+		errs = append(errs, errors.New("LOCAL_LLM_URL must be an http or https URL such as http://localhost:11434/v1"))
+	}
+	return errs
 }
 
 // Addr returns the host:port address of the HTTP server.
@@ -144,6 +178,29 @@ func isLoopback(addr string) bool {
 	}
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.IsLoopback()
+}
+
+// isRegion reports whether s has the form of an AWS region, for example
+// us-east-1 or us-gov-west-1. The region becomes a part of a host name, so
+// the check allows only lowercase letters, dashes, and a final number.
+func isRegion(s string) bool {
+	parts := strings.Split(s, "-")
+	if len(parts) < 3 {
+		return false
+	}
+	last := len(parts) - 1
+	for _, part := range parts[:last] {
+		if part == "" || strings.Trim(part, "abcdefghijklmnopqrstuvwxyz") != "" {
+			return false
+		}
+	}
+	return parts[last] != "" && strings.Trim(parts[last], "0123456789") == ""
+}
+
+// isHTTPURL reports whether s is an absolute http or https URL with a host.
+func isHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
 }
 
 // isModelRef reports whether ref has the form "provider/model" with two

@@ -47,16 +47,20 @@ func TestNewModelsNeedsTheKeyOfAProvider(t *testing.T) {
 	// The format is valid, but without its key the provider is not
 	// registered. The error names the key.
 	tests := []struct {
-		setting, model, key string
-		want                error
+		setting, model, key, value string
+		want                       error
 	}{
-		{"LLM_MODEL", "anthropic/claude-opus-5-5", "ANTHROPIC_API_KEY", llm.ErrUnknownProvider},
-		{"SYSTEMONE_MODEL", "typesafe/jev-latest", "TYPESAFE_API_KEY", systemone.ErrUnknownProvider},
+		{"LLM_MODEL", "anthropic/claude-opus-5-5", "ANTHROPIC_API_KEY", "test-key", llm.ErrUnknownProvider},
+		{"LLM_MODEL", "bedrock/us.anthropic.claude-sonnet-5", "BEDROCK_API_KEY", "test-key", llm.ErrUnknownProvider},
+		{"LLM_MODEL", "mistral/mistral-large-latest", "MISTRAL_API_KEY", "test-key", llm.ErrUnknownProvider},
+		{"LLM_MODEL", "xai/grok-4", "XAI_API_KEY", "test-key", llm.ErrUnknownProvider},
+		{"LLM_MODEL", "local/llama3.2", "LOCAL_LLM_URL", "http://localhost:11434/v1", llm.ErrUnknownProvider},
+		{"SYSTEMONE_MODEL", "typesafe/jev-latest", "TYPESAFE_API_KEY", "test-key", systemone.ErrUnknownProvider},
 	}
 	for _, tt := range tests {
-		t.Run(tt.setting, func(t *testing.T) {
+		t.Run(tt.model, func(t *testing.T) {
 			t.Parallel()
-			env := map[string]string{tt.setting: tt.model}
+			env := map[string]string{tt.setting: tt.model, "BEDROCK_REGION": "us-east-1"}
 			_, err := app.NewModels(config.Load(func(k string) string { return env[k] }))
 			if !errors.Is(err, tt.want) || !strings.Contains(err.Error(), tt.key) {
 				t.Fatalf("NewModels = %v, want %v that names %s", err, tt.want, tt.key)
@@ -64,7 +68,7 @@ func TestNewModelsNeedsTheKeyOfAProvider(t *testing.T) {
 
 			// With the key, the provider is registered. NewModels makes no
 			// network call, so the test does not call the real API.
-			env[tt.key] = "test-key"
+			env[tt.key] = tt.value
 			if _, err := app.NewModels(config.Load(func(k string) string { return env[k] })); err != nil {
 				t.Fatalf("NewModels with %s: %v", tt.key, err)
 			}

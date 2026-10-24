@@ -35,9 +35,9 @@ func main() {
 	}
 }
 
-// command is a subcommand. It runs after the migrations, and then the
-// process exits.
-type command func(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger, stdout io.Writer) error
+// command is a subcommand. It runs after the migrations. The process exits
+// when the command returns.
+type command func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, stdout io.Writer) error
 
 func run(ctx context.Context, args []string, getenv func(string) string, stdout io.Writer) error {
 	cmd, err := parseCommand(args)
@@ -67,7 +67,7 @@ func run(ctx context.Context, args []string, getenv func(string) string, stdout 
 		return fmt.Errorf("running migrations: %w", err)
 	}
 	if cmd != nil {
-		return cmd(ctx, pool, logger, stdout)
+		return cmd(ctx, cfg, pool, logger, stdout)
 	}
 	return serve(ctx, cfg, logger, pool)
 }
@@ -85,7 +85,7 @@ func parseCommand(args []string) (command, error) {
 			return nil, errors.New("usage: api migrate")
 		}
 		// run applies the migrations before every command.
-		return func(_ context.Context, _ *pgxpool.Pool, logger *slog.Logger, _ io.Writer) error {
+		return func(_ context.Context, _ config.Config, _ *pgxpool.Pool, logger *slog.Logger, _ io.Writer) error {
 			logger.Info("migrations applied")
 			return nil
 		}, nil
@@ -94,11 +94,19 @@ func parseCommand(args []string) (command, error) {
 			return nil, errors.New("usage: api adduser <email> <name>")
 		}
 		email, name := args[2], args[3]
-		return func(ctx context.Context, pool *pgxpool.Pool, _ *slog.Logger, stdout io.Writer) error {
+		return func(ctx context.Context, _ config.Config, pool *pgxpool.Pool, _ *slog.Logger, stdout io.Writer) error {
 			return addUser(ctx, pool, email, name, stdout)
 		}, nil
+	case "worker":
+		if len(args) != 2 {
+			return nil, errors.New("usage: api worker")
+		}
+		// The worker runs the background jobs until a signal stops it.
+		return func(ctx context.Context, cfg config.Config, pool *pgxpool.Pool, logger *slog.Logger, _ io.Writer) error {
+			return app.NewWorker(logger, cfg, pool).Run(ctx)
+		}, nil
 	default:
-		return nil, fmt.Errorf("unknown command %q (expected migrate or adduser)", args[1])
+		return nil, fmt.Errorf("unknown command %q (expected migrate, adduser, or worker)", args[1])
 	}
 }
 

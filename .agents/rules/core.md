@@ -12,7 +12,8 @@ feature-local HTTP code, repository interfaces, and stdlib-first tests.
 Do not add Afero, go-cmp, or another dependency solely because the skill
 suggests it. The application has two direct dependencies: pgx and the
 official Anthropic Go SDK. Only `internal/platform/llm/anthropic` imports
-the SDK (see Model Providers). The files in
+the SDK (see Model Providers). The job queue (`internal/platform/jobs`)
+and the other providers use only pgx and the standard library. The files in
 `.agents/rules/` are the single source of truth for conventions.
 `AGENTS.md` and `README.md` point to them and do not repeat them. Change
 a convention here, not there.
@@ -20,15 +21,17 @@ a convention here, not there.
 ## Package Layout: Features, Not Layers
 
 ```
-cmd/api/            main + run() + serve(); subcommands migrate, adduser; debug
-                    listener; no business logic
+cmd/api/            main + run() + serve(); subcommands migrate, adduser,
+                    worker; debug listener; no business logic
 migrations/         embedded SQL, append-only; new files are timestamp-prefixed
 internal/platform/  shared infrastructure: config, database, logging, web,
-                    llm, systemone; one subpackage per model provider
-                    (llm/anthropic, systemone/typesafe)
-internal/app/       composition — the only place that wires features;
-                    models.go registers the model providers
-internal/auth/      sessions; knows users only as id strings
+                    jobs, llm, systemone; one subpackage per provider API
+                    (llm/anthropic, llm/chatcompletions, systemone/typesafe)
+internal/app/       composition — the only place that wires features:
+                    app.go the routes, worker.go the jobs; models.go
+                    registers the model providers
+internal/auth/      sessions; knows users only as id strings; jobs.go has
+                    the hourly session cleanup
 internal/user/      feature slice (also owns login and the /me dashboard)
 internal/note/      feature slice — copy this one for a new feature
 internal/chat/      feature slice without storage — the LLM + SSE example
@@ -39,7 +42,8 @@ internal/testdb/    test databases
 - A new feature = a new package `internal/<name>`. Copy `internal/note/` and
   adapt. Keep the file split: `<name>.go` (types + errors), `service.go`,
   `repository.go` (interface), `postgres.go` (implementation), `http.go`
-  (routes + handlers), `templates/`, `service_test.go`. A feature that
+  (routes + handlers), `templates/`, `service_test.go`. A feature with
+  background jobs adds `jobs.go` (see Background Jobs). A feature that
   stores nothing (`internal/chat`, `internal/triage`) omits
   `repository.go` and `postgres.go`; its package doc says why.
 - Layers live as **files inside a feature package**, never as layer-named
@@ -50,8 +54,11 @@ internal/testdb/    test databases
   `postgres_share.go`. These prefixes identify files within a feature;
   they do not introduce layer packages.
 - Never create `utils/`, `helpers/`, `common/`, or `pkg/`.
-- A second binary (a worker, a cron job) is a new `cmd/<name>/` that reuses
-  `internal/*` and wires itself the same way `cmd/api` does.
+- Background work and scheduled work run in the worker: the `worker`
+  subcommand of `cmd/api` (see Background Jobs). Do not add a cron binary
+  for a schedule. A second binary for another purpose is a new
+  `cmd/<name>/` that reuses `internal/*` and wires itself the same way
+  `cmd/api` does.
 - `internal/platform/` holds only application-agnostic infrastructure. It
   must not import any feature.
 
@@ -70,7 +77,9 @@ internal/testdb/    test databases
    `internal/app/<name>_test.go` (user-visible flows, see testing.md).
 6. To show the feature on the `/me` dashboard, add an `hx-get`
    placeholder to `internal/user/templates/me.html` (see http.md).
-7. `just ci` must pass.
+7. If the feature has background jobs, add `jobs.go` and call
+   `<name>.Jobs(w, svc)` in `app.NewWorker` (see Background Jobs).
+8. `just ci` must pass.
 
 A feature that stores nothing skips step 1 and omits `repository.go` and
 `postgres.go`. Copy `internal/chat` (LLM) or `internal/triage` (System
@@ -180,15 +189,25 @@ the service:
 - Keep the two kinds apart. Do not add fields to `llm.Request` for a
   System One model, and do not add text generation to `systemone`. Keep
   the cores neutral: do not add a field to a request for one vendor.
-- The template has one real provider of each kind:
-  `internal/platform/llm/anthropic` (Claude, through the official SDK)
-  and `internal/platform/systemone/typesafe` (Jev, through `net/http`).
+- The template has these adapters. One adapter can serve many providers:
+  - `internal/platform/llm/anthropic` (the official SDK): the providers
+    `anthropic` and `bedrock`. Bedrock uses the same adapter with the
+    base URL `https://bedrock-runtime.<region>.amazonaws.com/anthropic/`
+    and a Bedrock API key.
+  - `internal/platform/llm/chatcompletions` (`net/http`): the APIs with
+    the shape of the Chat Completions API. The providers are `mistral`,
+    `xai`, and `local` (Ollama, vLLM, llama.cpp at `LOCAL_LLM_URL`).
+  - `internal/platform/systemone/typesafe` (`net/http`): Jev.
 - `app.NewModels` (`internal/app/models.go`) returns `app.Models{LLM,
   SystemOne}`. `newLLM` and `newSystemOne` register the providers of each
   kind and resolve the default model at startup. A real provider is
-  registered only when its key is set (`ANTHROPIC_API_KEY`,
-  `TYPESAFE_API_KEY` in `.env`). When the default model names a provider
-  that is not registered, the startup stops, and the error names the key.
+  registered only when its key or its URL is set (`ANTHROPIC_API_KEY`,
+  `BEDROCK_API_KEY` with `BEDROCK_REGION`, `MISTRAL_API_KEY`,
+  `XAI_API_KEY`, `LOCAL_LLM_URL`, `TYPESAFE_API_KEY` in `.env`). When the
+  default model names a provider that is not registered, the startup
+  stops, and the error names the keys.
+- To change the model or the vendor, change `LLM_MODEL` and set the key.
+  Do not change a feature for it.
 - A feature takes only the kind of model that it needs, together with its
   default model: `chat.NewService(models.LLM, cfg.LLMModel)`. A feature
   that needs both kinds takes both providers. Features depend only on
@@ -234,7 +253,8 @@ the service:
   in its `service.go` (`answerTimeout` in chat, `triageTimeout` in
   triage). The call also ends when the client leaves.
 - The adapter owns the retries. The Anthropic SDK retries a rate limit
-  and a server error two times. The TypeSafe adapter does not retry.
+  and a server error two times. The `chatcompletions` and TypeSafe
+  adapters do not retry.
 - Never call a model inside a database transaction. The transaction then
   holds a connection and its locks for the whole call.
 - Check the output of a model like user input. `triage.decide` rejects an
@@ -243,6 +263,16 @@ the service:
   prompt, a state, or an answer.
 
 ### Add a Provider
+
+When the API has the shape of the Chat Completions API (`POST
+<base>/chat/completions` with a `data:` event stream), do not write a new
+adapter. Add the key or the URL to the config (step 3 below) and register
+`chatcompletions.New(baseURL, key)` in `newLLM` (step 4). Set
+`StreamUsage` when the server sends the token counts only on request
+(`stream_options.include_usage`). Mistral sends them without the option
+and can reject an unknown field, so `mistral` leaves it off.
+
+For another API:
 
 1. Create `internal/platform/llm/<name>/` or
    `internal/platform/systemone/<name>/` with a type that implements the
@@ -255,10 +285,12 @@ the service:
    only `config.Load` reads the environment. A provider error must not
    contain the key or the request text.
 3. Add the key to `Config`, `config.Load`, `.env.example`, and the `api`
-   environment in `docker-compose.yml`. Extend `Validate` when a field
-   has constraints. A cloud provider (Bedrock, Vertex) uses the
-   credential chain of its cloud; then add its region or endpoint
-   instead of a key.
+   environment in `docker-compose.yml` (also the `worker` environment
+   when a job calls the model). Extend `Validate` when a field has
+   constraints. Bedrock uses a Bedrock API key and `BEDROCK_REGION`. A
+   provider that needs the credential chain of its cloud (IAM roles,
+   Vertex) needs the SDK of that cloud: that is a new dependency, so ask
+   first.
 4. Register the provider in `newLLM` or `newSystemOne` only when its key
    or endpoint is set. Name the key in the startup error.
 5. Test the request mapping, the response parsing, and the error path
@@ -268,6 +300,73 @@ Use the official Go SDK of a provider when one exists. Keep the SDK
 import inside the provider package, and record the dependency in
 `docs/third-party.md`. Without a Go SDK (TypeSafe has only Python and
 JavaScript SDKs), call the HTTP API with `net/http`.
+
+## Background Jobs
+
+`internal/platform/jobs` is a job queue on PostgreSQL. The `worker`
+subcommand of `cmd/api` runs it. Use a job for work that must not block a
+request, for a call to another service that needs retries, and for
+scheduled work.
+
+- **Register.** A feature puts its handlers and its schedules in
+  `jobs.go`: `func Jobs(w *jobs.Worker, svc *Service)`. This is the same
+  shape as `Routes`. `app.NewWorker` (`internal/app/worker.go`) constructs
+  the services and calls each `Jobs`. It is the only wiring point of the
+  jobs. The example is `internal/auth/jobs.go`.
+- **Kinds.** A kind has the form `<feature>.<action>`, for example
+  `auth.delete_expired_sessions`. Keep it in a constant in `jobs.go`. A
+  kind has 1 to 100 characters: `a-z`, `0-9`, `_`, and `.`. A worker
+  claims only the kinds that it handles, so a kind without a handler stays
+  queued. To rename a kind, add the new kind and keep the old handler
+  until no old job is queued.
+- **Handlers.** A handler is a maker function that closes over the
+  service and returns `jobs.Handler`, like an HTTP handler. It decodes
+  the payload, calls the service, and returns the error. The business
+  rules stay in `service.go`. A handler does not log its error: the worker
+  logs each result once.
+- **Idempotency.** Delivery is at least once. A crash, a deploy, or an
+  expired lease runs a job again. Make a second run safe: check the state
+  first, use an upsert, or send the job id as the idempotency key to an
+  external service.
+- **Errors.** An error retries the job after a backoff: 15 s, doubled on
+  each attempt, up to 1 h, plus up to 25 % jitter. After `MaxAttempts`
+  runs (default 10), the job fails. Wrap an error that a retry cannot fix
+  with `jobs.Permanent` (a bad payload, a deleted row). A panic counts as
+  an error. The log and `jobs.last_error` get the error text, so keep
+  private text out of it.
+- **Timeouts.** `Handle(kind, timeout, h)` sets the deadline of each run.
+  The handler must return when ctx ends. The lease of a run is the
+  timeout plus 30 s. After the lease, another worker can run the job.
+- **Payloads.** Store ids and small values, and read the rows in the
+  handler. Never put a key, a password, a token, a prompt, or private
+  text in a payload. The worker never logs a payload.
+- **Enqueue.** Enqueue in a repository method, in the transaction that
+  writes the rows: `jobs.Enqueue(ctx, tx, jobs.Params{...})` (see
+  database.md). A service has no pool, so a service never calls
+  `jobs.Enqueue` itself. `Params.RunAt` delays a job.
+- **Schedules.** `Schedule(kind, every, offset)` enqueues one job for
+  each slot, in UTC. `every = 24h` with `offset = 3h` runs daily at 03:00
+  UTC; a weekly slot starts on Monday. Each slot enqueues at most one job
+  across all replicas; a retry or a crash can run that job again. The
+  worker does not run the slots that it missed while it was down. A slot
+  is skipped while a job of the kind is queued or running, so two runs of
+  one schedule never overlap. Do not add a cron library.
+- **Models.** A job may call a model. The service sets the timeout of the
+  call, and the call never runs inside a transaction (see Call a Model).
+  Add the key to the `worker` environment in `docker-compose.yml`.
+- **Replicas.** Many workers can share one database. `FOR UPDATE SKIP
+  LOCKED` gives each job to one worker. The attempt number fences a stale
+  worker. The `job_schedules` upsert gives each slot to one replica.
+  Each process has its own pool, so keep the sum of the pools of all API
+  and worker replicas below `max_connections`. `workerConcurrency` (4)
+  caps the parallel jobs of one process.
+- **Shutdown.** SIGTERM stops the claims. The running jobs get 10 s; then
+  their contexts end, and they return to the queue at once. A stopped run
+  does not use up an attempt, but a `jobs.Permanent` error still fails
+  the job. Give the worker container a stop grace period of at least 15 s.
+- **Not included.** Priorities, unique jobs, job chains, and LISTEN/NOTIFY
+  (an idle claim loop polls once per second). Add one only when a feature
+  needs it.
 
 ## Errors
 
@@ -286,6 +385,8 @@ JavaScript SDKs), call the HTTP API with `net/http`.
   all — `web.E` → `web.RespondError` does the one log call.
 - Never `panic` in request paths; `RecoverPanics` is a last resort, not a
   control-flow mechanism.
+- Job handlers also return their errors. The worker logs each result
+  once and stores the error text in `jobs.last_error`.
 
 ## Logging
 
@@ -298,6 +399,8 @@ JavaScript SDKs), call the HTTP API with `net/http`.
   (`logger.ErrorContext(r.Context(), ...)`). The logging handler adds the
   context's correlation attributes to the record: `request_id` (seeded by
   `web.LogRequests`) and `user_id` (seeded by `auth.LoadIdentity`).
+  In a job, the worker adds `job_id`, `job_kind`, and `job_attempt` to
+  the context of the handler.
   Outside requests (startup, shutdown, CLI), plain `Info`/`Error` is fine.
 - Middleware adds correlation attributes with
   `logging.WithAttrs(ctx, slog.String(...))` — never re-attach them by hand

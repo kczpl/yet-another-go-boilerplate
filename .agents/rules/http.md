@@ -234,8 +234,11 @@ Progressive enhancement — every flow must work without JavaScript:
   names and argument counts before any configuration or database work.
   Subcommands: `migrate` applies migrations and exits; `adduser <email>
   <name>` creates an account with a generated password and prints it once
-  to stdout. An unknown subcommand is an error — never fall through to
-  serving. Add a subcommand as one more case in `parseCommand`.
+  to stdout; `worker` runs the background jobs of `app.NewWorker` until a
+  signal stops it (see core.md "Background Jobs"). Every command applies
+  the migrations first. An unknown subcommand is an error — never fall
+  through to serving. Add a subcommand as one more case in
+  `parseCommand`.
 - `http.Server` always sets `ReadHeaderTimeout`, `ReadTimeout`,
   `WriteTimeout`, `IdleTimeout`. Graceful shutdown drains with its own
   fresh 10s context.

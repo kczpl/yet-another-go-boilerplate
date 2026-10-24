@@ -88,16 +88,17 @@ func (r *Repo) Delete(ctx context.Context, tokenHash string) error {
 }
 
 // DeleteExpired implements Repository.
-func (r *Repo) DeleteExpired(ctx context.Context) error {
-	_, err := r.db.Exec(ctx, `
+func (r *Repo) DeleteExpired(ctx context.Context, limit int) (int, error) {
+	tag, err := r.db.Exec(ctx, `
 		DELETE FROM sessions WHERE token_hash IN (
 			SELECT token_hash FROM sessions
 			WHERE expires_at <= now()
 			ORDER BY expires_at
-			LIMIT 100
-		)`)
+			LIMIT @limit
+		)`,
+		pgx.NamedArgs{"limit": limit})
 	if err != nil {
-		return fmt.Errorf("deleting expired sessions: %w", err)
+		return 0, fmt.Errorf("deleting expired sessions: %w", err)
 	}
-	return nil
+	return int(tag.RowsAffected()), nil
 }

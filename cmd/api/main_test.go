@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"io"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -85,9 +87,49 @@ func TestRunRejectsBadArgs(t *testing.T) {
 func TestBadArgsDoNotReadConfigOrTouchDatabase(t *testing.T) {
 	t.Parallel()
 	getenv := func(string) string { t.Fatal("bad command read configuration"); return "" }
-	for _, args := range [][]string{{"api", "unknown"}, {"api", "migrate", "extra"}, {"api", "adduser"}} {
+	for _, args := range [][]string{{"api", "unknown"}, {"api", "migrate", "extra"}, {"api", "adduser"}, {"api", "worker", "extra"}} {
 		if err := run(t.Context(), args, getenv, io.Discard); err == nil {
 			t.Fatalf("accepted arguments %v", args)
 		}
+	}
+}
+
+// signalWriter collects the output and closes seen when the output first
+// contains want.
+type signalWriter struct {
+	mu   sync.Mutex
+	buf  strings.Builder
+	want string
+	seen chan struct{}
+}
+
+func (w *signalWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	had := strings.Contains(w.buf.String(), w.want)
+	w.buf.Write(p)
+	if !had && strings.Contains(w.buf.String(), w.want) {
+		close(w.seen)
+	}
+	return len(p), nil
+}
+
+func TestRunWorkerStopsWithTheContext(t *testing.T) {
+	t.Parallel()
+	getenv, _ := testEnv(t)
+	out := &signalWriter{want: "worker started", seen: make(chan struct{})}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, []string{"api", "worker"}, getenv, out) }()
+
+	select {
+	case <-out.seen:
+	case err := <-done:
+		t.Fatalf("run worker returned before the start: %v", err)
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run worker: %v", err)
 	}
 }

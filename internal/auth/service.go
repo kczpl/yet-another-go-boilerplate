@@ -24,6 +24,10 @@ const (
 // again cannot fill the table.
 const maxSessionsPerUser = 10
 
+// expiredBatch caps the rows of one cleanup statement, so the statement
+// stays short and holds few locks.
+const expiredBatch = 1000
+
 // Service issues, resolves, and revokes sessions.
 type Service struct {
 	repo Repository
@@ -50,9 +54,6 @@ func (s *Service) Start(ctx context.Context, w http.ResponseWriter, userID strin
 	if err := s.repo.Insert(ctx, userID, hashToken(token), s.ttl, maxSessionsPerUser); err != nil {
 		return fmt.Errorf("storing session: %w", err)
 	}
-	// Remove at most 100 expired rows. A failure must not break the login.
-	_ = s.repo.DeleteExpired(ctx)
-
 	http.SetCookie(w, s.cookie(token, s.ttl))
 	return nil
 }
@@ -80,6 +81,21 @@ func (s *Service) End(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	}
 	http.SetCookie(w, s.cookie("", -1))
 	return nil
+}
+
+// DeleteExpired removes all expired sessions in batches and returns the
+// number of removed sessions. SQL already rejects an expired session, so
+// the cleanup only keeps the table small. A scheduled job calls it (see
+// jobs.go).
+func (s *Service) DeleteExpired(ctx context.Context) (int, error) {
+	total := 0
+	for {
+		n, err := s.repo.DeleteExpired(ctx, expiredBatch)
+		total += n
+		if err != nil || n < expiredBatch {
+			return total, err
+		}
+	}
 }
 
 func (s *Service) cookie(value string, ttl time.Duration) *http.Cookie {

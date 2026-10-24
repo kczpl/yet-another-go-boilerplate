@@ -186,3 +186,71 @@ func TestValidateModels(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateBedrockNeedsARegion(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		region  string
+		wantErr bool
+	}{
+		{"us-east-1", false},
+		{"eu-central-1", false},
+		{"us-gov-west-1", false},
+		{"", true},
+		{"us-east", true},
+		{"US-EAST-1", true},
+		{"us-east-1.example.com", true},
+		{"us--1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.region, func(t *testing.T) {
+			cfg := config.Load(devEnv(map[string]string{"BEDROCK_API_KEY": "test-key", "BEDROCK_REGION": tt.region}))
+			err := cfg.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "BEDROCK_REGION") {
+					t.Fatalf("Validate = %v, want a BEDROCK_REGION error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate: %v, want nil", err)
+			}
+		})
+	}
+}
+
+func TestValidateLocalLLMURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		url     string
+		wantErr bool
+	}{
+		{"", false},
+		{"http://localhost:11434/v1", false},
+		{"https://llm.internal.example/v1", false},
+		{"localhost:11434/v1", true},
+		{"ftp://localhost/v1", true},
+		{"http:///v1", true},
+		{"http://user:s3cret@ho st/v1", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			cfg := config.Load(devEnv(map[string]string{"LOCAL_LLM_URL": tt.url}))
+			err := cfg.Validate()
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "LOCAL_LLM_URL") {
+					t.Fatalf("Validate = %v, want a LOCAL_LLM_URL error", err)
+				}
+				if strings.Contains(err.Error(), "s3cret") {
+					t.Fatalf("Validate = %v, it repeats the password of the URL", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Validate: %v, want nil", err)
+			}
+		})
+	}
+}

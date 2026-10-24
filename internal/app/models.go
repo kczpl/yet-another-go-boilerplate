@@ -8,6 +8,7 @@ import (
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/config"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/llm"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/llm/anthropic"
+	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/llm/chatcompletions"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/systemone"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/systemone/typesafe"
 )
@@ -15,6 +16,12 @@ import (
 // fakeDelay slows the fake model in development, so the stream is visible
 // in a browser. Tests use the production config and get no delay.
 const fakeDelay = 40 * time.Millisecond
+
+// The addresses of the hosted APIs with the Chat Completions shape.
+const (
+	mistralURL = "https://api.mistral.ai/v1"
+	xaiURL     = "https://api.x.ai/v1"
+)
 
 // Models holds the two kinds of model that the app can call. They serve
 // different purposes, so each kind has its own providers and its own
@@ -58,9 +65,29 @@ func newLLM(cfg config.Config) (*llm.Router, error) {
 	if cfg.AnthropicAPIKey != "" {
 		providers["anthropic"] = anthropic.New(anthropic.BaseURL, cfg.AnthropicAPIKey)
 	}
+	// Bedrock serves the Messages API of Anthropic under /anthropic/, so
+	// the anthropic provider also calls Claude on Bedrock.
+	if cfg.BedrockAPIKey != "" {
+		providers["bedrock"] = anthropic.New("https://bedrock-runtime."+cfg.BedrockRegion+".amazonaws.com/anthropic/", cfg.BedrockAPIKey)
+	}
+	if cfg.MistralAPIKey != "" {
+		providers["mistral"] = chatcompletions.New(mistralURL, cfg.MistralAPIKey)
+	}
+	// xAI and the local servers send the token counts of a stream only on
+	// request.
+	if cfg.XAIAPIKey != "" {
+		xai := chatcompletions.New(xaiURL, cfg.XAIAPIKey)
+		xai.StreamUsage = true
+		providers["xai"] = xai
+	}
+	if cfg.LocalLLMURL != "" {
+		local := chatcompletions.New(cfg.LocalLLMURL, "")
+		local.StreamUsage = true
+		providers["local"] = local
+	}
 	router := llm.NewRouter(providers)
 	if _, _, err := router.Resolve(cfg.LLMModel); err != nil {
-		return nil, fmt.Errorf("LLM_MODEL: %w (set the key of the provider in .env, for example ANTHROPIC_API_KEY, or register the provider in internal/app/models.go)", err)
+		return nil, fmt.Errorf("LLM_MODEL: %w (set the key of the provider in .env: ANTHROPIC_API_KEY, BEDROCK_API_KEY, MISTRAL_API_KEY, XAI_API_KEY, or LOCAL_LLM_URL; or register the provider in internal/app/models.go)", err)
 	}
 	return router, nil
 }

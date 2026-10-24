@@ -33,6 +33,10 @@ purpose.
 - A user keeps at most `maxSessionsPerUser` (10) sessions. `auth.Repo.Insert`
   removes the oldest sessions in the same transaction as the insert, so
   logins cannot fill the table.
+- The hourly job `auth.delete_expired_sessions` (`internal/auth/jobs.go`)
+  removes the expired sessions in batches of 1000. SQL rejects an expired
+  session also when the worker does not run; the job only keeps the table
+  small.
 - Accept the session token only from the cookie — never from a query
   parameter, a header, or a form field.
 
@@ -171,11 +175,19 @@ purpose.
   and driver error payloads. Operational errors are logged at the boundary.
 - Keep secrets out of the repository. `.env` is gitignored;
   configuration comes only from the environment (`config.Load`).
-- A model API key (`ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY`) goes from
-  `Config` only to the constructor of its provider. A provider error must
-  not contain the key or the request text: the TypeSafe adapter returns
-  only the status code. Never log keys. Do not log prompts, states, or
+- A model API key (`ANTHROPIC_API_KEY`, `BEDROCK_API_KEY`,
+  `MISTRAL_API_KEY`, `XAI_API_KEY`, `TYPESAFE_API_KEY`) goes from `Config`
+  only to the constructor of its provider. A provider error must not
+  contain the key or the request text: the `chatcompletions` and TypeSafe
+  adapters return only the status code, and an error event of a stream
+  becomes a fixed message. Never log keys. Do not log prompts, states, or
   answers: they can hold private text.
+- `LOCAL_LLM_URL` can hold a password. A config error does not repeat the
+  URL.
+- A job payload holds ids and small values, never a key, a password, a
+  token, a prompt, or private text. The worker never logs a payload. The
+  log and `jobs.last_error` get the error of a failed run, so keep private
+  text out of job errors.
 
 ## Not Included — Add Before Production
 
@@ -196,14 +208,16 @@ them before you expose the app publicly:
   tokens per day), and set a spend limit at each provider. Set
   `LLM_MODEL` and `SYSTEMONE_MODEL` to real models, or remove
   `internal/chat` and `internal/triage`.
-- **Scheduled session cleanup.** SQL rejects a session after the 7-day
-  TTL, but the TTL does not remove rows. Each login removes at most 100
-  expired rows. Use a scheduled job if the table must stay small without
-  logins.
+- **A worker deployment.** Run `api worker` as its own deployment with a
+  stop grace period of at least 15 s. Without a worker, the jobs stay
+  queued, and the expired sessions stay in the table.
 - **Metrics and tracing.** The app has structured logs, probes, and a
   loopback pprof/expvar listener. Add metrics and tracing as the
-  deployment needs them.
+  deployment needs them. Alert on the `job failed` log record (ERROR) or
+  on the rows with `status = 'failed'` in `jobs`. Also alert when the
+  oldest due job waits too long: a worker stopped, or a kind has no
+  handler. README "Operate the queue" has the queries.
 - **Backups, secret management, and monitoring of the database.**
-- **Separate database roles.** The app applies migrations at startup, so
-  its database role needs DDL rights. To run the app with a role without
+- **Separate database roles.** The app and the worker apply migrations
+  at startup, so their database role needs DDL rights. To run the app with a role without
   DDL rights, move the migrations to a separate deploy step.

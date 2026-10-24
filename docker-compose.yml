@@ -12,7 +12,32 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       SYSTEMONE_MODEL: ${SYSTEMONE_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      BEDROCK_API_KEY: ${BEDROCK_API_KEY:-}
+      BEDROCK_REGION: ${BEDROCK_REGION:-}
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY:-}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      LOCAL_LLM_URL: ${LOCAL_LLM_URL:-}
       TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+    # A local model server on the host is at host.docker.internal. Docker
+    # Desktop adds the name; this line adds it on Linux too.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # The worker runs the background jobs (internal/platform/jobs) from the
+  # same image. Start more replicas with --scale worker=3: the queue gives
+  # each job to one replica. Add the keys that a job needs.
+  worker:
+    build: .
+    command: ["worker"]
+    environment:
+      ENVIRONMENT: development
+      DATABASE_URL: postgres://app:app@postgres:5432/app
+    # Run gives the running jobs 10s and then 2s more. The default 10s
+    # stop period of Docker is too short.
+    stop_grace_period: 15s
     depends_on:
       postgres:
         condition: service_healthy

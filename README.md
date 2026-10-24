@@ -19,7 +19,8 @@ frameworks, no ORM, no DI container, no mocks.
 **Two direct dependencies: pgx and the official Anthropic SDK.** Only the
 Anthropic provider package imports the SDK. Sessions, password hashing,
 CSRF protection, rate limits, Server-Sent Events, templates, and
-migrations come from the standard library. `go.mod` pins the Go version,
+migrations come from the standard library. The background job queue runs
+on PostgreSQL through pgx, and the other model providers use `net/http`. `go.mod` pins the Go version,
 and the Dockerfile uses the same one.
 
 Built on two references:
@@ -34,6 +35,7 @@ Built on two references:
 - [Architecture](#architecture)
 - [Build a feature](#build-a-feature)
 - [Work with models](#work-with-models)
+- [Background jobs](#background-jobs)
 - [Testing](#testing)
 - [Configuration](#configuration) · [Commands](#commands) · [Conventions](#conventions)
 - [Working with AI agents](#working-with-ai-agents) · [Renaming](#renaming) · [Before production](#before-production)
@@ -44,6 +46,7 @@ Built on two references:
 cp .env.example .env
 just compose                                # full stack in Docker, or:
 docker compose up postgres -d && just app   # the app on the host
+just worker                                 # the background jobs (another terminal)
 just adduser bob@example.com "Bob"          # prints a generated password, once
 ```
 
@@ -99,18 +102,20 @@ the code easy to read for a person and easy to change for a coding agent.
 ### Layout
 
 ```
-cmd/api/            main: config → pool → migrate → app.New → server; subcommands: migrate, adduser
+cmd/api/            main: config → pool → migrate → app.New → server; subcommands: migrate, adduser, worker
 migrations/         embedded SQL migrations, applied on startup (append-only, timestamp-named)
 internal/
   platform/         shared infrastructure — features import it, it imports no feature
     config/         env-driven configuration
     database/       pgx pool + embedded SQL migrator
     logging/        slog construction + context-carried log attributes
-    llm/            provider-neutral core for text models; anthropic/ (official SDK)
+    jobs/           background job queue on PostgreSQL: retries, schedules, leases
+    llm/            provider-neutral core for text models; anthropic/ (official SDK),
+                    chatcompletions/ (net/http: Mistral, xAI, local servers)
     systemone/      provider-neutral core for System One models; typesafe/ (net/http)
     web/            layout, rendering, errors, middleware, rate limiter, SSE, static assets
-  app/              composition: wires every feature into one http.Handler
-  auth/             sessions: cookie ↔ hashed token in the database
+  app/              composition: app.New wires the routes, NewWorker wires the jobs
+  auth/             sessions: cookie ↔ hashed token in the database; hourly cleanup job
   user/             example feature: login, /me dashboard
   note/             example feature: a list with keyset pages — the one to copy
   chat/             example LLM feature: ask a question, stream the answer
@@ -181,7 +186,8 @@ cmd/api ──► app ──► features (user, note, chat, triage) ──► au
 
 - Features import `auth` and `platform`. Features never import each other.
 - `platform` imports no feature.
-- `app` is the only package that imports everything.
+- `app` is the only package that imports everything. `app.New` wires the
+  routes, and `app.NewWorker` wires the background jobs.
 
 When feature A needs the logic of feature B, A declares a small interface
 with only the methods that it calls. `app.New` passes B's service in. When
@@ -247,7 +253,7 @@ jobs:
 | Core package | [`internal/platform/llm`](internal/platform/llm) | [`internal/platform/systemone`](internal/platform/systemone) |
 | Interface | `Stream(ctx, req, onText)` | `Ask(ctx, req)` |
 | Default model | `LLM_MODEL` (`fake/echo`) | `SYSTEMONE_MODEL` (`fake/uniform`) |
-| Real provider | `anthropic` — Claude, official SDK | `typesafe` — Jev, plain `net/http` |
+| Real providers | `anthropic`, `bedrock`, `mistral`, `xai`, `local` (see below) | `typesafe` — Jev, plain `net/http` |
 | Example feature | [`internal/chat`](internal/chat) | [`internal/triage`](internal/triage) |
 
 A feature depends only on the core interface. It never imports a provider
@@ -265,6 +271,21 @@ ANTHROPIC_API_KEY=sk-ant-...
 SYSTEMONE_MODEL=typesafe/jev-latest
 TYPESAFE_API_KEY=...
 ```
+
+The LLM providers:
+
+| Provider | Example `LLM_MODEL` | Setting | Adapter |
+|---|---|---|---|
+| `anthropic` | `anthropic/claude-opus-5-5` | `ANTHROPIC_API_KEY` | `llm/anthropic` (official SDK) |
+| `bedrock` | `bedrock/us.anthropic.claude-sonnet-5` | `BEDROCK_API_KEY`, `BEDROCK_REGION` | `llm/anthropic` on the Anthropic route of Amazon Bedrock |
+| `mistral` | `mistral/mistral-large-latest` | `MISTRAL_API_KEY` | `llm/chatcompletions` |
+| `xai` | `xai/grok-4` | `XAI_API_KEY` | `llm/chatcompletions` |
+| `local` | `local/llama3.2` | `LOCAL_LLM_URL` | `llm/chatcompletions` (Ollama, vLLM, llama.cpp) |
+
+To change the model or the vendor, change `LLM_MODEL` and set the key. The
+features do not change. Mistral, xAI, and the local servers use the shape
+of the Chat Completions API, so one small adapter on `net/http` serves all
+three.
 
 `app.NewModels` ([`internal/app/models.go`](internal/app/models.go))
 registers a provider only when its key is set. A model of a provider
@@ -336,13 +357,226 @@ JavaScript, the same POST returns a full page with the complete answer.
 
 ### Add a provider
 
-Create a subpackage `internal/platform/llm/<name>/` or
+When the vendor has an API with the shape of the Chat Completions API
+(for example Groq, OpenRouter, or a vLLM server), you need no new package.
+Add the key or the URL to the config and register one more
+`chatcompletions.New(baseURL, key)` in `newLLM`.
+
+For another API, create a subpackage `internal/platform/llm/<name>/` or
 `internal/platform/systemone/<name>/` that implements the core interface.
 Use the official Go SDK of the vendor when one exists, and plain
 `net/http` when not. Add the key to the config, register the provider in
 `app.NewModels`, and test the adapter against an `httptest.Server`. The
 step-by-step list is "Add a Provider" in
 [`.agents/rules/core.md`](.agents/rules/core.md).
+
+## Background jobs
+
+The template has a job queue on PostgreSQL
+([`internal/platform/jobs`](internal/platform/jobs)). It needs no broker
+and no extra dependency. The same binary runs the HTTP server and the
+worker:
+
+```bash
+just worker                                                   # the worker on the host
+docker compose up --build --scale worker=3 api worker postgres   # three worker replicas
+```
+
+### How a job moves through the queue
+
+A job is one row in the `jobs` table. Its `status` column moves through
+four values:
+
+```
+                    claim           nil
+Enqueue ──► queued ──────► running ──────► done ──► deleted after 24 h
+              ▲               │  │
+              │    retry      │  │ jobs.Permanent, or
+              └───────────────┘  │ no attempts left
+                                 ▼
+                               failed ──► deleted after 7 days
+```
+
+1. **Enqueue.** `jobs.Enqueue` inserts a `queued` row with a `run_at`
+   time. A schedule slot inserts the same kind of row.
+2. **Claim.** An idle worker takes the oldest due row of a kind that it
+   handles. One `UPDATE` sets the status to `running`, adds 1 to
+   `attempts`, and sets the lease `locked_until`. The claim commits at
+   once, so no transaction stays open while the handler runs.
+3. **Run.** The worker calls the handler. The context of the handler ends
+   at the timeout of its kind.
+4. **Store.** The worker writes the result: `done`, `queued` with a later
+   `run_at` (a retry), or `failed`. The `UPDATE` must match the attempt
+   number of the claim, so a stale worker changes nothing.
+5. **Recover and clean up.** Every minute, each worker returns the
+   `running` jobs with an expired lease to the queue. When such a job has
+   no attempts left, it becomes `failed`. The same cleanup deletes the old
+   `done` and `failed` rows.
+
+A shutdown (SIGTERM) and an expired lease also return a `running` job to
+`queued`. One worker process runs 4 claim loops and one maintenance loop.
+A claim loop runs one job at a time and waits one second when no job is
+due. The maintenance loop enqueues the due schedule slots every second
+and runs the cleanup every minute.
+
+### Enqueue a job
+
+A feature enqueues a job in the repository method that writes its rows,
+in the same transaction. The job then exists only when the rows exist:
+
+```go
+// internal/toy/postgres.go
+err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
+	// ... INSERT INTO toys ...
+	_, err := jobs.Enqueue(ctx, tx, jobs.Params{
+		Kind:    "toy.send_receipt",
+		Payload: receipt{ToyID: toy.ID}, // ids, never secrets
+		RunAt:   time.Now().Add(time.Hour), // optional: a delayed job
+	})
+	return err
+})
+```
+
+### Handle a job
+
+A feature registers its handlers in `jobs.go`, as it registers its routes
+in `http.go`. The session cleanup is the example
+([`internal/auth/jobs.go`](internal/auth/jobs.go)):
+
+```go
+func Jobs(w *jobs.Worker, svc *Service) {
+	w.Handle("auth.delete_expired_sessions", time.Minute, handleDeleteExpired(svc))
+	w.Schedule("auth.delete_expired_sessions", time.Hour, 0) // every hour, on the hour (UTC)
+}
+```
+
+`app.NewWorker` ([`internal/app/worker.go`](internal/app/worker.go)) calls
+the `Jobs` function of each feature. It is the wiring point of the jobs, as
+`app.New` is the wiring point of the routes.
+
+### Retries, schedules, and shutdown
+
+- **Retries.** A handler error retries the job after a backoff: 15 s,
+  30 s, 1 min, and so on, up to 1 hour, plus up to 25 % random jitter.
+  After `MaxAttempts` runs (default 10), the job stays in the table with
+  the status `failed` and its last error. `jobs.Permanent(err)` stops the
+  retries at once, for example for a bad payload.
+- **Schedules.** `Schedule(kind, every, offset)` enqueues one job in each
+  slot, in UTC. `every = 24h` and `offset = 3h` run the job daily at
+  03:00 UTC. A slot that the workers missed while they were down does not
+  run later. A slot is skipped while a job of that kind is still queued or
+  running, so two runs of one schedule never overlap.
+- **Timeouts and leases.** Each handler has its own timeout. A running job
+  has a lease: the timeout plus 30 s. When a worker crashes, the lease
+  expires, and another worker runs the job again.
+- **Shutdown.** On SIGTERM, a worker stops its claims and gives the
+  running jobs 10 s. Then it cancels their contexts, and the jobs return
+  to the queue at once. A stopped run does not count as an attempt, so a
+  deploy cannot fail a job. The compose `stop_grace_period` of the worker
+  is 15 s for this reason.
+- **Cleanup.** The workers delete done jobs after 24 hours and failed jobs
+  after 7 days.
+
+To run a failed job again, raise its attempt limit. Do not reset
+`attempts`, because the attempt number protects the job against a stale
+worker:
+
+```sql
+UPDATE jobs
+SET status = 'queued', run_at = now(), max_attempts = attempts + 1, updated_at = now()
+WHERE id = '...' AND status = 'failed';
+```
+
+### Many replicas, one database
+
+Three worker containers (or more) can share one PostgreSQL:
+
+- The claim uses `FOR UPDATE SKIP LOCKED`. Each job goes to one worker,
+  and the workers do not wait for each other.
+- Each schedule slot is one conditional upsert in `job_schedules`. Only
+  the replica that wins the upsert enqueues the job, so the workers need
+  no leader.
+- The result of a run is stored only when the attempt number still
+  matches. A worker that lost its lease cannot overwrite a newer run.
+- A worker claims only the kinds that it handles. During a rolling
+  deploy, an old replica leaves a new kind for a new replica.
+
+Keep these points in mind:
+
+- **Delivery is at least once.** A crash or an expired lease runs a job
+  again. Write each handler so that a second run is safe.
+- **Connections.** Each process has its own pool (the pgx default is the
+  larger of 4 and the number of CPUs; set `pool_max_conns` in
+  `DATABASE_URL` to change it). Keep the sum over all API and worker
+  replicas below `max_connections` of PostgreSQL.
+- **Polling.** Each idle claim loop asks for a job once per second (4 loops
+  per worker). The query uses a partial index, so the cost is small. A due
+  job starts within about one second.
+- **Payloads and logs.** Store ids in a payload, not secrets or private
+  text. The worker logs the kind, the id, the attempt, and the error of a
+  run, never the payload. Keep private text out of the handler errors too:
+  the `jobs` table stores the last error.
+
+### Operate the queue
+
+The worker has no metrics endpoint. The `jobs` table is the source of
+truth, so watch it with SQL from your monitoring system:
+
+```sql
+-- The number of jobs in each state, by kind.
+SELECT kind, status, count(*) FROM jobs GROUP BY kind, status;
+
+-- The wait time of the oldest due job, by kind.
+SELECT kind, now() - min(run_at) AS waiting
+FROM jobs
+WHERE status = 'queued' AND run_at <= now()
+GROUP BY kind;
+
+-- The last failed jobs and their errors.
+SELECT id, kind, attempts, last_error, updated_at
+FROM jobs
+WHERE status = 'failed'
+ORDER BY updated_at DESC
+LIMIT 50;
+```
+
+Set alerts on these signals:
+
+- **A due job waits too long**, for example more than 5 minutes (the
+  second query). This alert finds a stopped worker, workers that cannot
+  keep up, and a kind without a handler.
+- **A job failed.** The worker logs `job failed` at ERROR. The cleanup
+  deletes a failed row after 7 days, so the alert must come before that.
+- **Leases expire often.** The WARN record `jobs recovered after an
+  expired lease` means that a worker crashed or a handler ran longer than
+  its lease.
+
+Know these limits before you depend on the queue:
+
+- **A handler must return when its context ends.** Go cannot stop a
+  goroutine from the outside. A handler that ignores its context blocks
+  one claim loop until the process exits. The lease expires, and another
+  worker runs the job again, but the first process now has one loop less.
+  The worker has no health endpoint, so the orchestrator does not restart
+  it. At shutdown, the worker logs `worker stopped; a handler ignored the
+  end of its context` at ERROR.
+- **A kind without a handler waits forever.** A worker claims only the
+  kinds that it handles, and the cleanup does not delete queued rows. To
+  remove a kind, delete its queued rows with SQL. Many such rows also slow
+  down the claim, because the claim index does not contain the kind.
+- **The queue is a busy table.** Each job causes one insert, at least two
+  updates, and one delete. Autovacuum removes the dead rows. A long
+  transaction anywhere in the database blocks the vacuum, and the claims
+  become slower. Under a high load, tune autovacuum for the `jobs` table.
+- **Latency.** A due job starts within about one second. After a worker
+  crash, the job runs again when its lease expires (the timeout plus
+  30 s) and the next cleanup runs (up to 1 minute later).
+- **Throughput.** The template has no load test. A queue of this design
+  on PostgreSQL usually handles hundreds of jobs per second. For a much
+  higher rate, use a dedicated message broker.
+- **Not included:** priorities, unique jobs, job chains, a cancel
+  operation, LISTEN/NOTIFY, and an admin page. Add one only when a feature
+  needs it.
 
 ## Testing
 
@@ -376,7 +610,8 @@ new migration rebuilds the template automatically.
 | Security invariants | `internal/app/security_test.go`, `auth_test.go` | headers, CSRF, body cap, unified 404, cookie flags, login rate limit |
 | Business rules + SQL | `internal/<feature>/service_test.go` | validation, ownership, pages — against a real database |
 | Model features | `internal/chat`, `internal/triage` | prompt, caps, and decisions with a stub provider, no database |
-| Provider adapters | `internal/platform/llm/anthropic`, `internal/platform/systemone/typesafe` | request mapping, response parsing, errors without the key — against `httptest.Server` |
+| Provider adapters | `internal/platform/llm/anthropic`, `llm/chatcompletions`, `systemone/typesafe` | request mapping, response parsing, errors without the key — against `httptest.Server` |
+| Job queue | `internal/platform/jobs`, `internal/app/worker_test.go` | claims, retries, leases, schedules, shutdown, many workers — against a real database |
 | Platform | `internal/platform/*`, `cmd/api` | migrator, middleware, config, SSE, startup |
 
 A flow test reads like a user session. The test client in
@@ -426,12 +661,18 @@ stops the startup on a bad value.
 | `LLM_MODEL` | `fake/echo` | The default text model as `provider/model`. |
 | `SYSTEMONE_MODEL` | `fake/uniform` | The default System One model as `provider/model`. |
 | `ANTHROPIC_API_KEY` | – | Registers the `anthropic` provider. |
+| `BEDROCK_API_KEY` | – | Registers the `bedrock` provider (an Amazon Bedrock API key). Needs `BEDROCK_REGION`. |
+| `BEDROCK_REGION` | – | The AWS region of Bedrock, for example `us-east-1`. |
+| `MISTRAL_API_KEY` | – | Registers the `mistral` provider. |
+| `XAI_API_KEY` | – | Registers the `xai` provider. |
+| `LOCAL_LLM_URL` | – | Registers the `local` provider: the base URL of a local server, for example `http://localhost:11434/v1` (Ollama). In Docker, use `host.docker.internal`. |
 | `TYPESAFE_API_KEY` | – | Registers the `typesafe` provider. |
 
 ## Commands
 
 ```bash
 just app / compose / build / fmt / lint / types / complexity / test / ci
+just worker                           # run the background jobs on the host
 just migrate                          # apply migrations (startup does this too)
 just makemigration create_toys_table  # new migration file (timestamp-named)
 just adduser bob@example.com "Bob"    # create an account, prints the password
@@ -491,10 +732,12 @@ grep -rl 'github.com/kczpl/yet-another-go-boilerplate' --include='*.go' . \
 
 ## Before production
 
-The template deliberately has no public registration, password reset,
-workers, or generic unit of work. Point the orchestrator at `/livez`
-(liveness, no database) and `/readyz` (readiness, a database ping). Before
-a public deployment, work through "Not Included — Add Before Production"
-in [`.agents/rules/security.md`](.agents/rules/security.md): TLS, limits
-for many replicas, a model budget, session cleanup, metrics, backups, and
+The template deliberately has no public registration, password reset, or
+generic unit of work. Point the orchestrator at `/livez` (liveness, no
+database) and `/readyz` (readiness, a database ping). Run the worker as a
+separate deployment (`api worker`) with a stop grace period of at least
+15 s, and set the alerts from [Operate the queue](#operate-the-queue).
+Before a public deployment, work through "Not Included — Add Before
+Production" in [`.agents/rules/security.md`](.agents/rules/security.md):
+TLS, limits for many replicas, a model budget, metrics, backups, and
 database roles.

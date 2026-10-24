@@ -8,15 +8,19 @@ govulncheck_version := "v1.9.0"
 default:
   @just --list
 
-# Start the API and PostgreSQL.
+# Start the API, the worker, and PostgreSQL.
 compose:
-  docker compose up --build api postgres
+  docker compose up --build api worker postgres
 
 # Run the API on the host. Start PostgreSQL first. The host recipes use
 # ENVIRONMENT=development when .env and the shell do not set it, because
 # the app defaults to production.
 app:
   ENVIRONMENT="${ENVIRONMENT:-development}" go run ./cmd/api
+
+# Run the background worker on the host. Start PostgreSQL first.
+worker:
+  ENVIRONMENT="${ENVIRONMENT:-development}" go run ./cmd/api worker
 
 # Build the production binary.
 build:

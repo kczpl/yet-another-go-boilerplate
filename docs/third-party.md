@@ -20,6 +20,15 @@ The application has two direct Go modules:
 - `github.com/anthropics/anthropic-sdk-go` v1.84.0 (MIT), the official
   Go SDK of Anthropic. Only `internal/platform/llm/anthropic` imports it.
 
+The other code that talks to a network service adds no module:
+
+- `internal/platform/llm/chatcompletions` (Mistral, xAI, local servers)
+  and `internal/platform/systemone/typesafe` use `net/http`.
+- Bedrock uses the Anthropic SDK with a Bedrock API key and the
+  `/anthropic` path of the Bedrock endpoint. It does not use the AWS SDK.
+- The job queue (`internal/platform/jobs`) uses pgx. It needs no queue
+  library and no cron library.
+
 The SDK adds 16 indirect modules, for example OpenTelemetry,
 `tidwall/gjson`, `invopop/jsonschema`, and `go.yaml.in/yaml/v4`. The
 compiler links only the packages that the binary uses. `govulncheck` in

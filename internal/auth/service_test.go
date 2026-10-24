@@ -149,48 +149,30 @@ func TestIdentifyRejectsExpiredSession(t *testing.T) {
 	}
 }
 
-func TestStartCleansUpExpiredSessions(t *testing.T) {
-	t.Parallel()
-	pool := testdb.New(t)
-	userID := seedUser(t, pool)
-
-	expired := auth.NewService(auth.NewRepo(pool), -time.Minute, false)
-	startSession(t, expired, userID)
-
-	// Each later Start call also deletes the expired rows.
-	live := auth.NewService(auth.NewRepo(pool), time.Hour, false)
-	startSession(t, live, userID)
-
-	var count int
-	err := pool.QueryRow(t.Context(),
-		"SELECT count(*) FROM sessions WHERE expires_at <= now()").Scan(&count)
-	if err != nil {
-		t.Fatalf("counting expired sessions: %v", err)
-	}
-	if count != 0 {
-		t.Errorf("expired sessions left = %d, want 0", count)
-	}
-}
-
-func TestExpiredSessionCleanupIsBounded(t *testing.T) {
+func TestDeleteExpiredRemovesOnlyExpiredSessions(t *testing.T) {
 	t.Parallel()
 	pool := testdb.New(t)
 	owner := seedUser(t, pool)
-	// The expired rows belong to another user. The session cap of owner
-	// must not remove them, so only the cleanup batch counts.
+	// The expired rows belong to another user, so the session cap of
+	// owner does not remove them. 1005 rows need two cleanup batches.
 	other := seedUser(t, pool)
-	_, err := pool.Exec(t.Context(), `INSERT INTO sessions (token_hash, user_id, expires_at) SELECT n::text, $1, now() - interval '1 hour' FROM generate_series(1, 105) n`, other)
+	_, err := pool.Exec(t.Context(), `INSERT INTO sessions (token_hash, user_id, expires_at) SELECT n::text, $1, now() - interval '1 hour' FROM generate_series(1, 1005) n`, other)
 	if err != nil {
 		t.Fatalf("seeding expired sessions: %v", err)
 	}
 	svc := auth.NewService(auth.NewRepo(pool), time.Hour, false)
 	cookie := startSession(t, svc, owner)
+
+	deleted, err := svc.DeleteExpired(t.Context())
+	if err != nil || deleted != 1005 {
+		t.Fatalf("DeleteExpired = %d, %v; want 1005, nil", deleted, err)
+	}
 	var expired int
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM sessions WHERE expires_at <= now()").Scan(&expired); err != nil {
 		t.Fatalf("counting expired sessions: %v", err)
 	}
-	if expired != 5 {
-		t.Fatalf("expired rows = %d, want 5 after one cleanup batch", expired)
+	if expired != 0 {
+		t.Errorf("expired rows = %d, want 0", expired)
 	}
 	if _, err := svc.Identify(t.Context(), requestWith(cookie)); err != nil {
 		t.Fatalf("cleanup removed the live session: %v", err)

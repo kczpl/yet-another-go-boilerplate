@@ -186,6 +186,20 @@ func TestStreamAPIErrorHidesKey(t *testing.T) {
 	}
 }
 
+// TestNewKeepsTheBasePath checks the route of Claude on Bedrock. Bedrock
+// serves the Messages API under /anthropic/ and reads the key from
+// x-api-key, as the API of Anthropic does.
+func TestNewKeepsTheBasePath(t *testing.T) {
+	t.Parallel()
+	api := newServer(t, "end_turn", nil)
+	bedrock := httptest.NewServer(http.StripPrefix("/anthropic", api.Config.Handler))
+	t.Cleanup(bedrock.Close)
+
+	if _, err := llm.Generate(t.Context(), anthropic.New(bedrock.URL+"/anthropic/", testKey), request()); err != nil {
+		t.Fatalf("Generate: %v, want a request to /anthropic/v1/messages", err)
+	}
+}
+
 // TestNewIgnoresEnvironment cannot run in parallel, because it sets
 // environment variables.
 func TestNewIgnoresEnvironment(t *testing.T) {
