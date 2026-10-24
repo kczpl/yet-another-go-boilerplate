@@ -16,12 +16,13 @@ with [htmx](https://htmx.org) (vendored, no JS build), embedded SQL
 migrations, `log/slog`, and tests against a **real PostgreSQL** — no
 frameworks, no ORM, no DI container, no mocks.
 
-**Two direct dependencies: pgx and the official Anthropic SDK.** Only the
-Anthropic provider package imports the SDK. Sessions, password hashing,
-CSRF protection, rate limits, Server-Sent Events, templates, and
-migrations come from the standard library. The background job queue runs
-on PostgreSQL through pgx, and the other model providers use `net/http`. `go.mod` pins the Go version,
-and the Dockerfile uses the same one.
+**One direct dependency: pgx.** Sessions, password hashing, CSRF
+protection, rate limits, Server-Sent Events, templates, and migrations
+come from the standard library. The background job queue runs on
+PostgreSQL through pgx. Every model provider (Anthropic, Bedrock,
+Mistral, xAI, local servers, TypeSafe) calls its API with `net/http` and
+uses no SDK. `go.mod` pins the Go version, and the Dockerfile uses the
+same one.
 
 Built on two references:
 
@@ -110,8 +111,8 @@ internal/
     database/       pgx pool + embedded SQL migrator
     logging/        slog construction + context-carried log attributes
     jobs/           background job queue on PostgreSQL: retries, schedules, leases
-    llm/            provider-neutral core for text models; anthropic/ (official SDK),
-                    chatcompletions/ (net/http: Mistral, xAI, local servers)
+    llm/            provider-neutral core for text models; anthropic/ (Claude, Bedrock),
+                    chatcompletions/ (Mistral, xAI, local servers); both on net/http
     systemone/      provider-neutral core for System One models; typesafe/ (net/http)
     web/            layout, rendering, errors, middleware, rate limiter, SSE, static assets
   app/              composition: app.New wires the routes, NewWorker wires the jobs
@@ -276,7 +277,7 @@ The LLM providers:
 
 | Provider | Example `LLM_MODEL` | Setting | Adapter |
 |---|---|---|---|
-| `anthropic` | `anthropic/claude-opus-5-5` | `ANTHROPIC_API_KEY` | `llm/anthropic` (official SDK) |
+| `anthropic` | `anthropic/claude-opus-5-5` | `ANTHROPIC_API_KEY` | `llm/anthropic` (the Messages API) |
 | `bedrock` | `bedrock/us.anthropic.claude-sonnet-5` | `BEDROCK_API_KEY`, `BEDROCK_REGION` | `llm/anthropic` on the Anthropic route of Amazon Bedrock |
 | `mistral` | `mistral/mistral-large-latest` | `MISTRAL_API_KEY` | `llm/chatcompletions` |
 | `xai` | `xai/grok-4` | `XAI_API_KEY` | `llm/chatcompletions` |
@@ -336,6 +337,10 @@ the guards that a model feature needs:
   `app.New`: chat allows 5 questions at once, then 1 every 10 seconds.
 - **No transactions.** Never call a model inside a database transaction.
   Call the model first, then write the result.
+- **No hidden retries.** The adapters do not retry. A rate limit or an
+  overloaded server returns an error at once. When a call must succeed
+  later, run it in a [background job](#background-jobs): the queue
+  retries it with a backoff.
 - **Untrusted output.** Check the model output like user input.
   `triage` rejects an unknown option and a probability outside 0..1. The
   page shows model text only as text, never as HTML.
@@ -364,9 +369,10 @@ Add the key or the URL to the config and register one more
 
 For another API, create a subpackage `internal/platform/llm/<name>/` or
 `internal/platform/systemone/<name>/` that implements the core interface.
-Use the official Go SDK of the vendor when one exists, and plain
-`net/http` when not. Add the key to the config, register the provider in
-`app.NewModels`, and test the adapter against an `httptest.Server`. The
+Call the API with plain `net/http`, not with the SDK of the vendor: an
+SDK adds many indirect modules. Add the key to the config, register the
+provider in `app.NewModels`, and test the adapter against an
+`httptest.Server`. The
 step-by-step list is "Add a Provider" in
 [`.agents/rules/core.md`](.agents/rules/core.md).
 
@@ -699,7 +705,7 @@ ideas; the rules hold the details.
 | [`testing.md`](.agents/rules/testing.md) | a real database per test, what to test where, CI |
 | [`security.md`](.agents/rules/security.md) | sessions, passwords, CSRF, headers, rate limits, the production checklist |
 
-Third-party code (htmx, the Anthropic SDK, the vendored skills) is listed
+Third-party code (pgx, htmx, the vendored skills) is listed
 in [`docs/third-party.md`](docs/third-party.md).
 
 ## Working with AI agents

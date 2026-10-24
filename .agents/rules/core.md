@@ -10,10 +10,10 @@ Style and structure rules for this codebase. The vendored `go` skill
 rules take precedence where the skill differs: retain `internal/`,
 feature-local HTTP code, repository interfaces, and stdlib-first tests.
 Do not add Afero, go-cmp, or another dependency solely because the skill
-suggests it. The application has two direct dependencies: pgx and the
-official Anthropic Go SDK. Only `internal/platform/llm/anthropic` imports
-the SDK (see Model Providers). The job queue (`internal/platform/jobs`)
-and the other providers use only pgx and the standard library. The files in
+suggests it. The application has one direct dependency: pgx. The model
+providers call their APIs with `net/http` and use no SDK (see Model
+Providers). The job queue (`internal/platform/jobs`) uses only pgx and
+the standard library. The files in
 `.agents/rules/` are the single source of truth for conventions.
 `AGENTS.md` and `README.md` point to them and do not repeat them. Change
 a convention here, not there.
@@ -190,7 +190,7 @@ the service:
   System One model, and do not add text generation to `systemone`. Keep
   the cores neutral: do not add a field to a request for one vendor.
 - The template has these adapters. One adapter can serve many providers:
-  - `internal/platform/llm/anthropic` (the official SDK): the providers
+  - `internal/platform/llm/anthropic` (`net/http`): the providers
     `anthropic` and `bedrock`. Bedrock uses the same adapter with the
     base URL `https://bedrock-runtime.<region>.amazonaws.com/anthropic/`
     and a Bedrock API key.
@@ -252,9 +252,9 @@ the service:
 - The feature sets the deadline of each call with `context.WithTimeout`
   in its `service.go` (`answerTimeout` in chat, `triageTimeout` in
   triage). The call also ends when the client leaves.
-- The adapter owns the retries. The Anthropic SDK retries a rate limit
-  and a server error two times. The `chatcompletions` and TypeSafe
-  adapters do not retry.
+- The adapters do not retry. A rate limit or a server error returns an
+  error with the status code. When a call must succeed later, run it in
+  a job: the job queue retries it with a backoff (see Background Jobs).
 - Never call a model inside a database transaction. The transaction then
   holds a connection and its locks for the whole call.
 - Check the output of a model like user input. `triage.decide` rejects an
@@ -280,10 +280,12 @@ For another API:
    types (`llm.StopReason`, `systemone.QuestionType`), and fill `Usage`.
    The constructor takes all its values: `New(baseURL, apiKey string)`.
    Tests then point it at an `httptest.Server`.
-2. An SDK reads its own environment variables by default. Turn that off
-   (`option.WithoutEnvironmentDefaults()` in the Anthropic SDK), because
-   only `config.Load` reads the environment. A provider error must not
-   contain the key or the request text.
+2. Call the API with `net/http`. Copy the structure of
+   `internal/platform/llm/anthropic` or `chatcompletions`: one request
+   type, one stream reader, and a cap on the length of one line. Return
+   only the status code on an error, because the error body can repeat
+   the request. A provider error must not contain the key or the request
+   text.
 3. Add the key to `Config`, `config.Load`, `.env.example`, and the `api`
    environment in `docker-compose.yml` (also the `worker` environment
    when a job calls the model). Extend `Validate` when a field has
@@ -296,10 +298,11 @@ For another API:
 5. Test the request mapping, the response parsing, and the error path
    against an `httptest.Server`. Tests never call a live model.
 
-Use the official Go SDK of a provider when one exists. Keep the SDK
-import inside the provider package, and record the dependency in
-`docs/third-party.md`. Without a Go SDK (TypeSafe has only Python and
-JavaScript SDKs), call the HTTP API with `net/http`.
+Do not add the SDK of a provider. An SDK adds many indirect modules, and
+an adapter on `net/http` has about 200 lines. When an API cannot work
+without an SDK (for example, a signature scheme of a cloud), ask first.
+Then keep the SDK import inside the provider package, and record the
+dependency in `docs/third-party.md`.
 
 ## Background Jobs
 

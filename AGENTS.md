@@ -16,9 +16,9 @@ this file and a rule differ, the rule is correct.
 Never break these rules. The rule file in brackets gives the reason and
 the details.
 
-- Do not add a dependency. The only direct dependencies are pgx and the
-  official Anthropic SDK. Only `internal/platform/llm/anthropic` imports
-  the SDK. [core.md]
+- Do not add a dependency. The only direct dependency is pgx. A model
+  provider calls its API with `net/http`; never add the SDK of a
+  provider. [core.md]
 - Features never import each other. `internal/platform` never imports a
   feature. Only `internal/app` wires features: `app.go` the routes,
   `worker.go` the jobs. [core.md]
@@ -157,8 +157,9 @@ internal/
     database/     pgx pool + migrator
     logging/      slog + context-carried log attributes
     jobs/         job queue: Enqueue, Worker (Handle, Schedule, Run), retries, leases
-    llm/          text models: Provider, Router, Fake; anthropic/ (SDK),
-                  chatcompletions/ (Mistral, xAI, local servers; net/http)
+    llm/          text models: Provider, Router, Fake; anthropic/ (Claude,
+                  Bedrock), chatcompletions/ (Mistral, xAI, local servers);
+                  both on net/http
     systemone/    System One models: Provider, Router, Fake; typesafe/
     web/          templates, errors, middleware, rate limiter, SSE, assets
   app/            the only wiring point: app.New (routes), NewWorker (jobs);

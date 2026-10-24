@@ -89,10 +89,9 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   `internal/platform/llm/chatcompletions`,
   `internal/platform/systemone/typesafe`) tests the request mapping, the
   response parsing, and the error path against an `httptest.Server`. An
-  error must not contain the key or the request text.
-  `TestNewIgnoresEnvironment` uses `t.Setenv`, so it does not run in
-  parallel. `TestNewKeepsTheBasePath` checks the Bedrock route
-  (`/anthropic/`).
+  error must not contain the key or the request text. An error event in
+  the stream and a line over the cap also need a test.
+  `TestNewKeepsTheBasePath` checks the Bedrock route (`/anthropic/`).
 - The job queue (`internal/platform/jobs`) tests against a real database.
   A test drives the worker with `RunDue`: it enqueues the due schedule
   slots, runs the cleanup, and then runs the due jobs one at a time. A

@@ -1,6 +1,6 @@
 // Package typesafe is the systemone provider for the System One models of
-// TypeSafe, for example Jev. TypeSafe has SDKs only for Python and
-// JavaScript, so the package calls the HTTP API with net/http.
+// TypeSafe, for example Jev. It calls the HTTP API with net/http, as the
+// other providers do.
 package typesafe
 
 import (
