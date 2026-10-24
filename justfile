@@ -52,6 +52,8 @@ test *flags:
   docker compose up -d --wait postgres-test
   go test -race -count=1 ./... "$@"
 
+# Run all the checks. The repository has no CI/CD pipeline, so run this
+# recipe before each commit.
 ci: lint types complexity test vulncheck
 
 # Apply the migrations. App startup also applies them.

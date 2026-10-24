@@ -449,5 +449,7 @@ This template optimizes for readability and agentic editing, not DRY:
 - `just ci` runs lint, types, complexity, race tests, and govulncheck.
   Tool versions live in the justfile. Keep tools outside the application
   module, so they do not add dependencies to `go.mod`.
-- CI also builds the Docker image. Update the Go patch version in go.mod
-  and Dockerfile together when security fixes arrive.
+- The repository has no CI/CD pipeline. Run `just ci` before each commit.
+  When the Dockerfile or the Go version changes, also run `docker build .`.
+  Update the Go patch version in go.mod and Dockerfile together when
+  security fixes arrive.

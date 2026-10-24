@@ -7,7 +7,6 @@
   <img alt="pgx" src="https://img.shields.io/badge/pgx-v5-336791?logo=postgresql&logoColor=white">
   <img alt="htmx" src="https://img.shields.io/badge/htmx-2-3366CC?logoColor=white">
   <img alt="just" src="https://img.shields.io/badge/just-tasks-DE5FE9?logo=just&logoColor=white">
-  <img alt="CI" src="https://github.com/kczpl/yet-another-go-boilerplate/actions/workflows/ci.yml/badge.svg">
 </p>
 
 Minimal, feature-based Go web service template. Stdlib `net/http`,
@@ -687,9 +686,9 @@ just vulncheck                        # govulncheck
 
 `just ci` runs lint (`go vet`, `go fix -diff`, staticcheck, gofmt), types,
 cognitive complexity (gocognit, at most 10), race tests against
-PostgreSQL, and govulncheck. CI runs it on main pushes and pull requests,
-then builds the Docker image. The justfile pins the tool versions, and
-the tools do not add application dependencies.
+PostgreSQL, and govulncheck. The repository has no CI/CD pipeline, so
+run `just ci` before each commit. The justfile pins the tool versions,
+and the tools do not add application dependencies.
 
 ## Conventions
 
@@ -702,7 +701,7 @@ ideas; the rules hold the details.
 | [`core.md`](.agents/rules/core.md) | package layout, dependency direction, services, model providers, errors, logging |
 | [`http.md`](.agents/rules/http.md) | middleware chain, handlers, htmx fragments and redirects, SSE, templates, auth |
 | [`database.md`](.agents/rules/database.md) | repositories, SQL, keyset pages, transactions, timeouts, migrations |
-| [`testing.md`](.agents/rules/testing.md) | a real database per test, what to test where, CI |
+| [`testing.md`](.agents/rules/testing.md) | a real database per test, what to test where, the checks |
 | [`security.md`](.agents/rules/security.md) | sessions, passwords, CSRF, headers, rate limits, the production checklist |
 
 Third-party code (pgx, htmx, the vendored skills) is listed

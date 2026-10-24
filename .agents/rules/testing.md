@@ -134,12 +134,12 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
 - Test files sit next to the code they test — there is no separate `tests/`
   tree.
 
-## CI
+## Checks
 
-- `.github/workflows/ci.yml` runs `just ci` (lint, types, complexity, tests,
-  and vulncheck) on main pushes and pull requests, then builds the Docker
-  image. `just test` passes extra arguments safely and disables result
-  caching so database tests run on every invocation.
+- The repository has no CI/CD pipeline. Run `just ci` (lint, types,
+  complexity, tests, and vulncheck) on your machine before each commit.
+  `just test` passes extra arguments safely and disables result caching
+  so database tests run on every invocation.
 - Keep the job queue tests (see What to Test Where).
 - Keep migration tests for rollback, parallel calls, late files,
   cancellation, and the statement timeout (a migration that runs longer

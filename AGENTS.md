@@ -80,7 +80,7 @@ rule lists the files that the rule covers.
 - @.agents/rules/core.md — package layout, dependencies, services, model providers, errors, logging
 - @.agents/rules/http.md — middleware chain, handlers, htmx fragments and redirects, SSE, templates, auth
 - @.agents/rules/database.md — repositories, SQL, keyset pages, transactions, timeouts, migrations
-- @.agents/rules/testing.md — a real database per test, the test helpers, what to test where, CI
+- @.agents/rules/testing.md — a real database per test, the test helpers, what to test where, the checks
 - @.agents/rules/security.md — sessions, passwords, input, headers, rate limits, the production checklist
 
 Agents do not discover the skills in `.agents/skills/` automatically. Read
