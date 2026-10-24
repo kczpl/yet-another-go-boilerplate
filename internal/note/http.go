@@ -74,8 +74,7 @@ func handleNoteAdd(svc *Service) web.HandlerE {
 		form := noteForm{Text: r.PostFormValue("text")}
 
 		_, err := svc.Add(r.Context(), identity.UserID, form.Text)
-		var vErr ValidationError
-		if errors.As(err, &vErr) {
+		if vErr, ok := errors.AsType[ValidationError](err); ok {
 			data, err := loadNotes(r.Context(), svc, identity.UserID, Cursor{})
 			if err != nil {
 				return err
@@ -126,10 +125,11 @@ func loadNotes(ctx context.Context, svc *Service, userID string, after Cursor) (
 		return notesData{}, err
 	}
 	return notesData{
-		Page:  web.Page{Title: "My notes", LoggedIn: true},
-		Notes: notes,
-		After: formatCursor(after),
-		Older: formatCursor(next),
+		Title:    "My notes",
+		LoggedIn: true,
+		Notes:    notes,
+		After:    formatCursor(after),
+		Older:    formatCursor(next),
 	}, nil
 }
 

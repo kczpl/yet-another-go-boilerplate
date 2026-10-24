@@ -12,9 +12,11 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kczpl/yet-another-go-boilerplate/internal/auth"
+	"github.com/kczpl/yet-another-go-boilerplate/internal/chat"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/note"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/config"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/web"
+	"github.com/kczpl/yet-another-go-boilerplate/internal/triage"
 	"github.com/kczpl/yet-another-go-boilerplate/internal/user"
 )
 
@@ -28,18 +30,39 @@ const (
 	loginInterval = 20 * time.Second
 )
 
+// Each chat question is a paid model call. A client can ask 5 questions at
+// once and after that one question every 10 seconds (360 per hour).
+const (
+	chatBurst    = 5
+	chatInterval = 10 * time.Second
+)
+
+// Each triage is a paid model call too. A System One call is short and
+// cheap, so the limit is higher: 10 at once, then one every 5 seconds.
+const (
+	triageBurst    = 10
+	triageInterval = 5 * time.Second
+)
+
 // maxRequestBytes caps every request body. The largest legitimate body in
 // this app is a small HTML form; 1 MiB leaves generous room.
 const maxRequestBytes = 1 << 20
 
 // New wires every feature and returns the complete HTTP handler. This is
 // the only wiring point: register a new feature here — construct its
-// service, then call its Routes below.
-func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handler {
+// service, then call its Routes below. models serves the model calls; in
+// production it comes from NewModels. A feature gets only the providers
+// that it calls (models.LLM, models.SystemOne, or both), each with its
+// default model from cfg.
+func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool, models Models) http.Handler {
 	users := user.NewService(user.NewRepo(pool))
 	notes := note.NewService(note.NewRepo(pool))
+	chats := chat.NewService(models.LLM, cfg.LLMModel)
+	triages := triage.NewService(models.SystemOne, cfg.SystemOneModel)
 	sessions := auth.NewService(auth.NewRepo(pool), sessionTTL, !cfg.Development())
 	loginLimiter := web.NewRateLimiter(loginInterval, loginBurst, cfg.ClientIPHeader)
+	chatLimiter := web.NewRateLimiter(chatInterval, chatBurst, cfg.ClientIPHeader)
+	triageLimiter := web.NewRateLimiter(triageInterval, triageBurst, cfg.ClientIPHeader)
 
 	// The pages mux holds every feature route. It sits behind the session
 	// and CSRF middleware.
@@ -47,6 +70,8 @@ func New(logger *slog.Logger, cfg config.Config, pool *pgxpool.Pool) http.Handle
 	auth.Routes(pages, logger, sessions)
 	user.Routes(pages, logger, users, sessions, loginLimiter)
 	note.Routes(pages, logger, notes)
+	chat.Routes(pages, logger, chats, chatLimiter)
+	triage.Routes(pages, logger, triages, triageLimiter)
 
 	// The pattern "/" catches every request that no other route matches.
 	// The unified 404 replaces the stdlib text response.

@@ -13,17 +13,25 @@ import (
 	"github.com/kczpl/yet-another-go-boilerplate/internal/platform/web"
 )
 
+// TestRequestLogRecordsFirstFinalStatus checks a handler that writes a
+// second status. The client gets only the first status, so the log must
+// show the first status too.
 func TestRequestLogRecordsFirstFinalStatus(t *testing.T) {
-	for _, implicit := range []bool{false, true} {
-		t.Run(map[bool]string{false: "explicit", true: "implicit"}[implicit], func(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		first func(http.ResponseWriter)
+	}{
+		{"explicit", func(w http.ResponseWriter) { w.WriteHeader(http.StatusCreated) }},
+		{"implicit", func(w http.ResponseWriter) { _, _ = io.WriteString(w, "ok") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var logs strings.Builder
 			logger := logging.New(&logs, slog.LevelInfo, logging.JSON)
 			h := web.LogRequests(logger, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				if implicit {
-					_, _ = io.WriteString(w, "ok")
-				} else {
-					w.WriteHeader(http.StatusCreated)
-				}
+				tt.first(w)
 				w.WriteHeader(http.StatusInternalServerError)
 			}))
 			rec := httptest.NewRecorder()
@@ -38,12 +46,13 @@ func TestRequestLogRecordsFirstFinalStatus(t *testing.T) {
 func TestPanicUsesUnifiedResponse(t *testing.T) {
 	t.Parallel()
 	logger := logging.New(io.Discard, slog.LevelInfo, logging.JSON)
-	h := web.RecoverPanics(logger, web.SecureHeaders(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("private cause") }), false))
+	panics := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic("private cause") })
+	h := web.RecoverPanics(logger, web.SecureHeaders(panics, false))
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("Accept", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
-	if rec.Code != 500 || !strings.Contains(rec.Body.String(), `"status":500`) {
+	if rec.Code != http.StatusInternalServerError || !strings.Contains(rec.Body.String(), `"status":500`) {
 		t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
 	}
 	if strings.Contains(rec.Body.String(), "private cause") {
@@ -75,11 +84,11 @@ func TestTemplateFailureDoesNotCommitPartialHTML(t *testing.T) {
 	logger := logging.New(io.Discard, slog.LevelInfo, logging.JSON)
 	tmpl := template.Must(template.New("fragment").Parse(`private prefix {{.Missing}}`))
 	h := web.E(logger, func(w http.ResponseWriter, _ *http.Request) error {
-		return web.RenderFragment(w, 200, tmpl, "fragment", struct{}{})
+		return web.RenderFragment(w, http.StatusOK, tmpl, "fragment", struct{}{})
 	})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != 500 || strings.Contains(rec.Body.String(), "private prefix") {
+	if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "private prefix") {
 		t.Fatalf("response = %d %s", rec.Code, rec.Body.String())
 	}
 }

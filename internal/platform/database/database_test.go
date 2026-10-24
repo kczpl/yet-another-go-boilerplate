@@ -41,7 +41,7 @@ func TestQueryLogsOmitPrivateData(t *testing.T) {
 			logger := logging.New(&out, level, logging.JSON)
 			pool, err := database.Connect(t.Context(), base.Config().ConnString(), logger)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("Connect: %v", err)
 			}
 			t.Cleanup(pool.Close)
 			ctx := logging.WithAttrs(t.Context(), slog.String("request_id", "trace-123"))
@@ -49,7 +49,7 @@ func TestQueryLogsOmitPrivateData(t *testing.T) {
 				"email": level.String() + "@private.example", "name": "Private Name", "hash": "pbkdf2-sha256$private-hash",
 			})
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("inserting a user: %v", err)
 			}
 			_, err = pool.Exec(ctx, "SELECT $1::integer", "private-invalid-input")
 			if err == nil {
@@ -101,12 +101,12 @@ func TestConnectSetsStatementTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			pool, err := database.Connect(t.Context(), tt.url, logger)
 			if err != nil {
-				t.Fatal(err)
+				t.Fatalf("Connect: %v", err)
 			}
 			t.Cleanup(pool.Close)
 			var got string
 			if err := pool.QueryRow(t.Context(), "SHOW statement_timeout").Scan(&got); err != nil {
-				t.Fatal(err)
+				t.Fatalf("SHOW statement_timeout: %v", err)
 			}
 			if got != tt.want {
 				t.Errorf("statement_timeout = %q, want %q", got, tt.want)

@@ -16,7 +16,7 @@ adapted to server-rendered HTML + htmx and to error-returning handlers.
 
 ## Composition & Routes
 
-- `app.New(logger, cfg, pool)` builds the complete handler: repositories →
+- `app.New(logger, cfg, pool, models)` builds the complete handler: repositories →
   services → feature routes → middleware. Tests construct the exact same
   handler as production. `cmd/api` adds only `http.Server` around it.
 - Each feature exposes `Routes(mux, logger, deps...)` in its `http.go` and
@@ -31,7 +31,8 @@ adapted to server-rendered HTML + htmx and to error-returning handlers.
   `POST /notes/{id}/delete` with a real `<form>`; htmx upgrades the same
   URL with `hx-post`. Never register a browser-facing DELETE/PUT/PATCH.
 - A feature owns the URL prefix that matches its package name
-  (`note` → `/notes`). The account feature owns `/`, `/login`, and `/me`;
+  (`note` → `/notes`, `chat` → `/chat`, `triage` → `/triage`). The
+  account feature owns `/`, `/login`, and `/me`;
   auth owns `/logout`. `app.New` registers infrastructure paths:
   `/livez`, `/readyz`, `/static/`, and the `"/"` catch-all that turns every
   unmatched request into the unified 404. The catch-all sits behind the
@@ -101,7 +102,8 @@ Progressive enhancement — every flow must work without JavaScript:
 - Check `web.IsHTMX(r)` (the `HX-Request` header) to pick the response kind.
 - htmx request → `return web.RenderFragment(w, status, tmpl, "notes-section",
   data)` with the page's single swap-target section (`#profile-section`,
-  `#notes-section`), whole, on success **and** on validation errors.
+  `#notes-section`, `#chat-section`, `#triage-section`), whole, on
+  success **and** on validation errors.
 - Plain request, success → redirect (PRG): `http.Redirect(w, r, "/me?saved=1",
   http.StatusSeeOther); return nil`. Plain request, validation error →
   `return web.RenderPage(w, http.StatusUnprocessableEntity, tmpl, data)`
@@ -109,12 +111,54 @@ Progressive enhancement — every flow must work without JavaScript:
 - Cross-feature composition happens in the browser, never through Go
   imports: a page embeds another feature's section with
   `hx-get="/other" hx-trigger="load" hx-swap="outerHTML"` and a fallback
-  link inside the placeholder (see the `/me` dashboard embedding
-  `#notes-section`). The embedded feature's GET handler returns the fragment
-  for htmx requests and the full page otherwise.
+  link inside the placeholder. The `/me` dashboard embeds
+  `#notes-section`, `#chat-section`, and `#triage-section` this way
+  (`internal/user/templates/me.html`). The embedded feature's GET handler
+  returns the fragment for htmx requests and the full page otherwise.
+  `TestDashboardEmbedsFeatures` checks both paths for each card.
 - Status codes: 200 render, 303 redirect after POST, 400 bad form data,
   401 bad login / htmx-unauthenticated, 404 unknown page or foreign
   resource, 422 validation, 500 unexpected (opaque).
+
+## Streaming (SSE)
+
+- `web.NewEventStream(w)` starts a Server-Sent Events response: status
+  200, `Content-Type: text/event-stream`, `Cache-Control: no-store`,
+  `X-Accel-Buffering: no`, and an immediate flush. It removes the write
+  deadline of that response, so a stream can outlive
+  `http.Server.WriteTimeout`. `ReadTimeout` does not stop a running
+  handler, because the server clears the read deadline itself.
+- A handler that waits for slow work before a normal page (the no-JS chat
+  answer) calls `web.RemoveWriteDeadline(w)` first. When the deadline
+  passes, the server drops the response, but the request context does
+  not end, so the model call runs and costs money for nothing.
+- `http.ResponseController` must reach the connection through every
+  middleware. A middleware that wraps the `ResponseWriter` implements
+  `Unwrap` (see `statusRecorder`). Otherwise the deadline change fails
+  silently, and production cuts each answer at `WriteTimeout`.
+  `TestChatOutlivesWriteTimeout` checks the full chain.
+- `stream.Send(event, data)` writes one event and flushes it. Each line of
+  data becomes one `data:` field. An event name with a line break is an
+  error.
+- Choose the stream with `web.WantsEventStream(r)` (`Accept:
+  text/event-stream`). Without that header, answer with the full page, so
+  the flow works without JavaScript (see `internal/chat/http.go`).
+- Do every check that can need an error status before `NewEventStream`:
+  auth, rate limit, form parse. After the stream starts, the status is
+  200 and cannot change:
+  - Send a `ValidationError` as an `error` event with its message.
+  - For an unexpected error, send a generic `error` event and return the
+    error. `web.E` sees that the response started and only logs the
+    error: INFO when the client left, ERROR otherwise.
+- The browser reads the stream with `fetch` and POST (`static/app.js`),
+  not with `EventSource`. `EventSource` sends only GET, and the CSRF guard
+  does not cover GET. A request that costs money or changes state stays a
+  POST.
+- The chat events are `delta` (a part of the text), `done` (the stop
+  reason), and `error` (a safe message). The client adds text with
+  `append` or `textContent`, never with `innerHTML`.
+- Graceful shutdown waits 10 seconds. A longer stream ends with the
+  shutdown, and the client shows that the answer stopped early.
 
 ## Errors
 
@@ -150,8 +194,10 @@ Progressive enhancement — every flow must work without JavaScript:
   them. Mutating buttons live inside a `<form>`, never as bare
   `hx-*`-only buttons.
 - The htmx-config meta enables swaps on 422. It disables eval, script tags,
-  inline indicator styles, and local history storage. Keep these settings
-  compatible with the CSP. `static/app.js` shows terminal request failures
+  inline indicator styles, and local history storage. It also removes
+  `style` from `attributesToSettle`: a browser extension can add a `style`
+  attribute to a field, and the CSP blocks the copy of that attribute
+  after a swap. Keep these settings compatible with the CSP. `static/app.js` shows terminal request failures
   in the shared alert without discarding submitted form values.
 - Static assets are embedded in `internal/platform/web/static/` and served
   at `/static/`. htmx is vendored there; never add a CDN script tag, an
@@ -210,5 +256,9 @@ Progressive enhancement — every flow must work without JavaScript:
 - CSRF rejections use the stdlib 403 response. Probes and missing static
   assets also use stdlib responses. The unified error contract
   applies to feature handlers and recoverable panics before a response.
+- `POST /chat` and `POST /triage` without JavaScript render the answer
+  page with 200, not a redirect. The features store nothing, so PRG has
+  no resource to redirect to. A reload asks the model again; the browser
+  warns before it sends the form again.
 - auth.Service includes the cookie adapter. It is specific to browser
   sessions; feature business services remain independent of HTTP.

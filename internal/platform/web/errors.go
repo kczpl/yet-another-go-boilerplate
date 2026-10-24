@@ -24,6 +24,7 @@ type HTTPError struct {
 	Err    error
 }
 
+// Error returns the message and, when it exists, the internal cause.
 func (e *HTTPError) Error() string {
 	if e.Err != nil {
 		return fmt.Sprintf("%s: %v", e.Msg, e.Err)
@@ -31,6 +32,7 @@ func (e *HTTPError) Error() string {
 	return e.Msg
 }
 
+// Unwrap returns the internal cause.
 func (e *HTTPError) Unwrap() error { return e.Err }
 
 // BadRequest builds a 400 with a client-safe message.
@@ -53,11 +55,25 @@ func TooManyRequests(msg string) *HTTPError {
 type HandlerE func(w http.ResponseWriter, r *http.Request) error
 
 // E adapts a HandlerE to http.Handler. A returned error goes through
-// RespondError, so every endpoint fails in the same format.
+// RespondError, so every endpoint fails in the same format. When the
+// handler already started the response (for example an event stream), the
+// status is gone. E then only logs the error.
 func E(logger *slog.Logger, h HandlerE) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if err := h(w, r); err != nil {
-			RespondError(logger, w, r, err)
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		err := h(rec, r)
+		switch {
+		case err == nil:
+		case !rec.wroteHeader:
+			RespondError(logger, rec, r, err)
+		case r.Context().Err() != nil:
+			// The client closed the connection. This is normal for a
+			// stream, so it is not an error.
+			logger.InfoContext(r.Context(), "client left before the response ended",
+				"method", r.Method, "path", r.URL.Path, "error", err)
+		default:
+			logger.ErrorContext(r.Context(), "error after response start",
+				"method", r.Method, "path", r.URL.Path, "status", rec.status, "error", err)
 		}
 	})
 }
@@ -67,8 +83,8 @@ func E(logger *slog.Logger, h HandlerE) http.Handler {
 // (Accept: application/json) get a JSON envelope. Everyone else gets the
 // shared error page. Only Msg reaches the client.
 func RespondError(logger *slog.Logger, w http.ResponseWriter, r *http.Request, err error) {
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) {
+	httpErr, ok := errors.AsType[*HTTPError](err)
+	if !ok {
 		httpErr = &HTTPError{Status: http.StatusInternalServerError, Err: err}
 	}
 	msg := httpErr.Msg
@@ -96,7 +112,7 @@ func RespondError(logger *slog.Logger, w http.ResponseWriter, r *http.Request, e
 		return
 	}
 	renderErr := RenderPage(w, httpErr.Status, errorTmpl, errorData{
-		Page:       Page{Title: http.StatusText(httpErr.Status)},
+		Title:      http.StatusText(httpErr.Status),
 		Status:     httpErr.Status,
 		StatusText: http.StatusText(httpErr.Status),
 		Msg:        msg,

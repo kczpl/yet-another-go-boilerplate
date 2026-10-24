@@ -57,8 +57,7 @@ func TestRegisterValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := svc.Register(t.Context(), tt.email, tt.userName, tt.password)
-			var vErr user.ValidationError
-			if !errors.As(err, &vErr) {
+			if _, ok := errors.AsType[user.ValidationError](err); !ok {
 				t.Errorf("Register = %v, want ValidationError", err)
 			}
 		})

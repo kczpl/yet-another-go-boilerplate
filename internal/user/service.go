@@ -21,6 +21,7 @@ type Service struct {
 	repo Repository
 }
 
+// NewService returns a Service that keeps the accounts in repo.
 func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }

@@ -105,9 +105,13 @@ func parseCommand(args []string) (command, error) {
 // serve runs the HTTP server until ctx ends or a listener fails. Then it
 // drains the open requests.
 func serve(ctx context.Context, cfg config.Config, logger *slog.Logger, pool *pgxpool.Pool) error {
+	models, err := app.NewModels(cfg)
+	if err != nil {
+		return err
+	}
 	srv := &http.Server{
 		Addr:              cfg.Addr(),
-		Handler:           app.New(logger, cfg, pool),
+		Handler:           app.New(logger, cfg, pool, models),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
 		WriteTimeout:      30 * time.Second,
@@ -159,7 +163,7 @@ func addUser(ctx context.Context, pool *pgxpool.Pool, email, name string, stdout
 		return fmt.Errorf("creating user: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "user created\n")
+	fmt.Fprintln(stdout, "user created")
 	fmt.Fprintf(stdout, "  id:    %s\n", u.ID)
 	fmt.Fprintf(stdout, "  email: %s\n", u.Email)
 	fmt.Fprintf(stdout, "  temporary password (shown once): %s\n", password)

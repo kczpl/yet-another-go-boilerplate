@@ -74,7 +74,10 @@ purpose.
   values). Database `CHECK` constraints are the backstop, not the first
   line of defense.
 - `html/template` escapes all output. Never use `template.HTML`,
-  `template.JS`, or `template.URL` with user data.
+  `template.JS`, or `template.URL` with user data. Model output is user
+  data.
+- Streamed model text reaches the page only as text: `append(string)` or
+  `textContent` in `static/app.js`. Never use `innerHTML` for it.
 - Validate path-parameter ids with `isUUID` before a uuid cast; treat
   garbage as not found (see `internal/note/http.go`).
 
@@ -118,6 +121,13 @@ purpose.
   it is full, new clients get 429 until idle keys expire (fail closed).
 - There is no limit per account. Such a limit lets any person lock out any
   account. Add one only with a plan for that risk.
+- `POST /chat` has its own limiter: a burst of 5 questions, then one
+  question per 10 seconds. Each question is a paid model call. The limit
+  runs before the stream starts, so a limited client gets a real 429. The
+  service also caps the question length and `MaxTokens`.
+- `POST /triage` has its own limiter: a burst of 10 messages, then one
+  message per 5 seconds. A System One call is short, so the limit is
+  higher than the chat limit. The service caps the message length.
 - Put a new limiter on each endpoint that is expensive or that guesses a
   secret. Construct it in `app.New` and pass it to `Routes`.
 
@@ -161,6 +171,11 @@ purpose.
   and driver error payloads. Operational errors are logged at the boundary.
 - Keep secrets out of the repository. `.env` is gitignored;
   configuration comes only from the environment (`config.Load`).
+- A model API key (`ANTHROPIC_API_KEY`, `TYPESAFE_API_KEY`) goes from
+  `Config` only to the constructor of its provider. A provider error must
+  not contain the key or the request text: the TypeSafe adapter returns
+  only the status code. Never log keys. Do not log prompts, states, or
+  answers: they can hold private text.
 
 ## Not Included — Add Before Production
 
@@ -173,8 +188,14 @@ them before you expose the app publicly:
 - **Limits for many replicas.** The login limit is per process. With many
   replicas, or for limits per account, move the counters to a shared store
   (PostgreSQL or the proxy).
-- **Limits on other endpoints.** Only `POST /login` has a limit in the
-  app. Add a general request limit at the proxy.
+- **Limits on other endpoints.** Only `POST /login`, `POST /chat`, and
+  `POST /triage` have a limit in the app. Add a general request limit at
+  the proxy.
+- **A model budget per user.** The chat and triage limits are per IP and
+  per replica. Before production, add a quota per account (calls or
+  tokens per day), and set a spend limit at each provider. Set
+  `LLM_MODEL` and `SYSTEMONE_MODEL` to real models, or remove
+  `internal/chat` and `internal/triage`.
 - **Scheduled session cleanup.** SQL rejects a session after the 7-day
   TTL, but the TTL does not remove rows. Each login removes at most 100
   expired rows. Use a scheduled job if the table must stay small without
@@ -183,3 +204,6 @@ them before you expose the app publicly:
   loopback pprof/expvar listener. Add metrics and tracing as the
   deployment needs them.
 - **Backups, secret management, and monitoring of the database.**
+- **Separate database roles.** The app applies migrations at startup, so
+  its database role needs DDL rights. To run the app with a role without
+  DDL rights, move the migrations to a separate deploy step.

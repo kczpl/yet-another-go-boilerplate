@@ -2,13 +2,11 @@ package auth_test
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kczpl/yet-another-go-boilerplate/internal/auth"
@@ -19,11 +17,12 @@ import (
 // on the user package.
 func seedUser(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	email := fmt.Sprintf("auth-%d@example.com", time.Now().UnixNano())
-	rows, _ := pool.Query(t.Context(),
-		"INSERT INTO users (email, name, password_hash) VALUES ($1, 'Auth Test', 'x') RETURNING id",
-		email)
-	id, err := pgx.CollectExactlyOneRow(rows, pgx.RowTo[string])
+	// A random email lets one test seed many users.
+	var id string
+	err := pool.QueryRow(t.Context(), `
+		INSERT INTO users (email, name, password_hash)
+		VALUES (gen_random_uuid()::text || '@example.com', 'Auth Test', 'x')
+		RETURNING id`).Scan(&id)
 	if err != nil {
 		t.Fatalf("seeding user: %v", err)
 	}
@@ -122,7 +121,7 @@ func TestIdentifyRejectsBadTokens(t *testing.T) {
 	}{
 		{"no cookie", nil},
 		{"unknown token", &http.Cookie{Name: "session_id", Value: "e30gPGZha2UgdG9rZW4sIDMyIGJ5dGVzPiAK"}},
-		{"empty token", &http.Cookie{Name: "session_id", Value: "x"}},
+		{"short token", &http.Cookie{Name: "session_id", Value: "x"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -182,13 +181,13 @@ func TestExpiredSessionCleanupIsBounded(t *testing.T) {
 	other := seedUser(t, pool)
 	_, err := pool.Exec(t.Context(), `INSERT INTO sessions (token_hash, user_id, expires_at) SELECT n::text, $1, now() - interval '1 hour' FROM generate_series(1, 105) n`, other)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("seeding expired sessions: %v", err)
 	}
 	svc := auth.NewService(auth.NewRepo(pool), time.Hour, false)
 	cookie := startSession(t, svc, owner)
 	var expired int
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM sessions WHERE expires_at <= now()").Scan(&expired); err != nil {
-		t.Fatal(err)
+		t.Fatalf("counting expired sessions: %v", err)
 	}
 	if expired != 5 {
 		t.Fatalf("expired rows = %d, want 5 after one cleanup batch", expired)
@@ -213,7 +212,7 @@ func TestStartCapsSessionsPerUser(t *testing.T) {
 
 	var count int
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM sessions WHERE user_id = $1", owner).Scan(&count); err != nil {
-		t.Fatal(err)
+		t.Fatalf("counting sessions: %v", err)
 	}
 	if count != 10 {
 		t.Fatalf("sessions = %d, want the cap of 10", count)

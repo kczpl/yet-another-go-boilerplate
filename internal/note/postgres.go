@@ -16,12 +16,14 @@ type Repo struct {
 
 var _ Repository = (*Repo)(nil)
 
+// NewRepo returns a Repo that runs its queries on db.
 func NewRepo(db *pgxpool.Pool) *Repo {
 	return &Repo{db: db}
 }
 
 const noteColumns = "id, user_id, text, created_at, updated_at"
 
+// Insert implements Repository.
 func (r *Repo) Insert(ctx context.Context, userID, text string) (Note, error) {
 	rows, _ := r.db.Query(ctx, `
 		INSERT INTO notes (user_id, text)
@@ -72,6 +74,7 @@ func (r *Repo) ListByUser(ctx context.Context, userID string, after Cursor, limi
 	return notes, nil
 }
 
+// Delete implements Repository.
 func (r *Repo) Delete(ctx context.Context, userID, id string) error {
 	// The owner scope makes a foreign id delete zero rows, the same as an
 	// unknown id.

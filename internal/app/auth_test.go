@@ -114,7 +114,7 @@ func TestRequireIdentity(t *testing.T) {
 
 	// An htmx request gets a 401 with HX-Redirect, so htmx navigates the
 	// whole page.
-	rec = c.do(http.MethodPost, "/me", url.Values{"name": {"x"}}, true)
+	rec = c.htmxPost("/me", url.Values{"name": {"x"}})
 	wantStatus(t, rec, http.StatusUnauthorized)
 	if got := rec.Header().Get("HX-Redirect"); got != "/login" {
 		t.Fatalf("HX-Redirect = %q, want /login", got)
@@ -138,7 +138,7 @@ func TestHomeRedirects(t *testing.T) {
 func TestSessionDatabaseFailureReturnsServerError(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
-	c.register("failure@example.com", "Failure", "s3cret-pass")
+	c.register("bob@example.com", "Bob", "s3cret-pass")
 	c.pool.Close()
 	for _, htmx := range []bool{false, true} {
 		rec := c.do(http.MethodGet, "/me", nil, htmx)
@@ -150,5 +150,6 @@ func TestSessionDatabaseFailureReturnsServerError(t *testing.T) {
 			t.Fatal("database failure cleared the session cookie")
 		}
 	}
+	// Static assets do not use the database, so they still load.
 	wantStatus(t, c.get("/static/htmx.min.js"), http.StatusOK)
 }

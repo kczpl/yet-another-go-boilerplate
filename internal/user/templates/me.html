@@ -1,18 +1,32 @@
 {{define "content"}}
 <header class="page-head">
   <h1>Your dashboard</h1>
+  <p class="muted">Each card is one feature package in internal/. The page loads the cards with htmx, so no feature imports another.</p>
 </header>
 
 <div class="dashboard">
   {{template "profile-section" .}}
 
-  {{/* The note feature owns this section. The dashboard embeds it over
-       HTTP (hx-get on load), never through a Go import. Without JavaScript,
-       the placeholder link leads to the full page. */}}
+  {{/* Other features own the sections below. The dashboard embeds each
+       one over HTTP (hx-get on load), never through a Go import. The
+       placeholder keeps the id of the section that replaces it. Without
+       JavaScript, the placeholder link leads to the full page. */}}
   <section id="notes-section" class="card"
            hx-get="/notes" hx-trigger="load" hx-swap="outerHTML">
     <h2>My notes</h2>
     <p class="muted"><a href="/notes">Open your notes →</a></p>
+  </section>
+
+  <section id="chat-section" class="card"
+           hx-get="/chat" hx-trigger="load" hx-swap="outerHTML">
+    <h2>Chat</h2>
+    <p class="muted"><a href="/chat">Ask the model →</a></p>
+  </section>
+
+  <section id="triage-section" class="card"
+           hx-get="/triage" hx-trigger="load" hx-swap="outerHTML">
+    <h2>Triage</h2>
+    <p class="muted"><a href="/triage">Route a support message →</a></p>
   </section>
 </div>
 {{end}}

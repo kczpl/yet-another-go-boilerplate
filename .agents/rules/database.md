@@ -83,6 +83,9 @@ paths:
   example is `auth.Repo.Insert`: it inserts a session and applies the
   per-user session cap in one transaction. The infrastructure example is
   `internal/platform/database/migrate.go`.
+- Never call a model or another network service inside a transaction.
+  The transaction then holds a connection and its locks for the whole
+  call. Call the model first, then write the result.
 - Services do not manage database transactions. A service may call several
   repository methods to carry out a use case. Separate calls are not atomic.
   When writes must succeed together, expose one repository operation that

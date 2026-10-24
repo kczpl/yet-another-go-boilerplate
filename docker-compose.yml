@@ -8,6 +8,11 @@ services:
       HOST: 0.0.0.0
       PORT: 8080
       DATABASE_URL: postgres://app:app@postgres:5432/app
+      # Compose reads these values from .env.
+      LLM_MODEL: ${LLM_MODEL:-}
+      SYSTEMONE_MODEL: ${SYSTEMONE_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy

@@ -2,13 +2,10 @@ package note_test
 
 import (
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/kczpl/yet-another-go-boilerplate/internal/note"
@@ -19,11 +16,12 @@ import (
 // on the user package.
 func seedUser(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	email := fmt.Sprintf("note-%d@example.com", time.Now().UnixNano())
-	rows, _ := pool.Query(t.Context(),
-		"INSERT INTO users (email, name, password_hash) VALUES ($1, 'Note Test', 'x') RETURNING id",
-		email)
-	id, err := pgx.CollectExactlyOneRow(rows, pgx.RowTo[string])
+	// A random email lets one test seed many users.
+	var id string
+	err := pool.QueryRow(t.Context(), `
+		INSERT INTO users (email, name, password_hash)
+		VALUES (gen_random_uuid()::text || '@example.com', 'Note Test', 'x')
+		RETURNING id`).Scan(&id)
 	if err != nil {
 		t.Fatalf("seeding user: %v", err)
 	}
@@ -86,8 +84,7 @@ func TestAddValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := svc.Add(t.Context(), owner, tt.text)
-			var vErr note.ValidationError
-			if !errors.As(err, &vErr) {
+			if _, ok := errors.AsType[note.ValidationError](err); !ok {
 				t.Errorf("Add = %v, want ValidationError", err)
 			}
 		})
@@ -143,10 +140,10 @@ func TestListPagesByKeyset(t *testing.T) {
 		INSERT INTO notes (user_id, text, created_at)
 		SELECT $1, n::text, '2026-01-01T12:00:00Z' FROM generate_series(1, 45) n`, owner)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("seeding notes: %v", err)
 	}
 	if _, err := svc.Add(t.Context(), other, "private note"); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Add: %v", err)
 	}
 
 	var all []note.Note
@@ -187,11 +184,11 @@ func TestListLastPageHasNoCursor(t *testing.T) {
 	// second page.
 	_, err := pool.Exec(t.Context(), `INSERT INTO notes (user_id, text) SELECT $1, n::text FROM generate_series(1, $2::int) n`, owner, pageSize)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("seeding notes: %v", err)
 	}
 	notes, next, err := svc.List(t.Context(), owner, note.Cursor{})
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("List: %v", err)
 	}
 	if len(notes) != pageSize || !next.IsZero() {
 		t.Fatalf("List = %d notes, next %+v; want %d notes and no next page", len(notes), next, pageSize)

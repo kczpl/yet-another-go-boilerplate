@@ -150,3 +150,39 @@ func TestValidateDebugAddr(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateModels(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Load(devEnv(nil))
+	if cfg.LLMModel != "fake/echo" || cfg.SystemOneModel != "fake/uniform" {
+		t.Errorf("defaults = %q, %q, want fake/echo, fake/uniform", cfg.LLMModel, cfg.SystemOneModel)
+	}
+	tests := []struct {
+		model   string
+		wantErr bool
+	}{
+		{"anthropic/claude-opus-5-5", false},
+		{"local/meta-llama/Llama-3.3-70B", false},
+		{"claude-opus-5-5", true},
+		{"/echo", true},
+		{"fake/", true},
+	}
+	for _, key := range []string{"LLM_MODEL", "SYSTEMONE_MODEL"} {
+		for _, tt := range tests {
+			t.Run(key+"="+tt.model, func(t *testing.T) {
+				cfg := config.Load(devEnv(map[string]string{key: tt.model}))
+				err := cfg.Validate()
+				if tt.wantErr {
+					if err == nil || !strings.Contains(err.Error(), key) {
+						t.Fatalf("Validate = %v, want a %s error", err, key)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("Validate: %v, want nil", err)
+				}
+			})
+		}
+	}
+}

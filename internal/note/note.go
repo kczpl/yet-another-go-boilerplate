@@ -20,6 +20,7 @@ var ErrNotFound = errors.New("note not found")
 // users, so handlers render it directly in forms.
 type ValidationError string
 
+// Error implements the error interface.
 func (e ValidationError) Error() string { return string(e) }
 
 // Note is one row in the notes table.

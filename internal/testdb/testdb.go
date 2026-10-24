@@ -15,6 +15,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"testing"
@@ -38,7 +39,8 @@ import (
 const advisoryLockID = 987_654_321
 
 // New returns a pool that is connected to a fresh, fully migrated database.
-// Only this test owns the database.
+// Only this test owns the database. The pool has the production settings
+// of database.Connect.
 func New(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -70,7 +72,7 @@ func New(t *testing.T) *pgxpool.Pool {
 		t.Fatalf("creating test database: %v", err)
 	}
 
-	pool, err := pgxpool.New(ctx, withDatabase(base, name))
+	pool, err := connect(ctx, base, name)
 	if err != nil {
 		t.Fatalf("connecting to test database: %v", err)
 	}
@@ -116,7 +118,7 @@ func ensureTemplate(ctx context.Context, conn *pgx.Conn, base string) (string, e
 		return "", fmt.Errorf("creating template: %w", err)
 	}
 
-	pool, err := pgxpool.New(ctx, withDatabase(base, name))
+	pool, err := connect(ctx, base, name)
 	if err != nil {
 		return "", fmt.Errorf("connecting to template: %w", err)
 	}
@@ -161,15 +163,16 @@ func baseURL() string {
 	return "postgres://app_test:app_test@localhost:" + port + "/app_test"
 }
 
-// withDatabase swaps the database name in a connection URL. An earlier
-// connection already used base, so base parses.
-func withDatabase(base, dbname string) string {
+// connect opens a pool on the database dbname of the server in base. It
+// uses database.Connect, so tests get the production pool settings, for
+// example statement_timeout.
+func connect(ctx context.Context, base, dbname string) (*pgxpool.Pool, error) {
 	u, err := url.Parse(base)
 	if err != nil {
-		panic(fmt.Sprintf("parsing database url: %v", err))
+		return nil, fmt.Errorf("parsing database url: %w", err)
 	}
 	u.Path = "/" + dbname
-	return u.String()
+	return database.Connect(ctx, u.String(), slog.New(slog.DiscardHandler))
 }
 
 func randomSuffix() string {

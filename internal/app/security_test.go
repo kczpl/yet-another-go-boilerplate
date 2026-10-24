@@ -2,7 +2,6 @@ package app_test
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -18,15 +17,14 @@ func TestUnifiedErrors(t *testing.T) {
 	// An unknown path renders the shared error page, not the stdlib text.
 	rec := c.get("/no-such-page")
 	wantStatus(t, rec, http.StatusNotFound)
-	wantContains(t, rec, "<html")
+	wantPage(t, rec)
 	wantContains(t, rec, "404")
 	wantContains(t, rec, "this page does not exist")
 
 	// A JSON client gets the JSON error envelope instead of HTML.
-	req := httptest.NewRequest(http.MethodGet, "/no-such-page", nil)
+	req := newRequest(http.MethodGet, "/no-such-page", nil)
 	req.Header.Set("Accept", "application/json")
-	rec = httptest.NewRecorder()
-	c.handler.ServeHTTP(rec, req)
+	rec = c.send(req)
 	wantStatus(t, rec, http.StatusNotFound)
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
 		t.Fatalf("Content-Type = %q, want application/json", ct)
@@ -43,33 +41,33 @@ func TestCrossOriginPostRejected(t *testing.T) {
 	// The server must reject a cross-site browser request (the browser sets
 	// Sec-Fetch-Site), even with a valid session cookie. This is the CSRF
 	// protection.
-	req := httptest.NewRequest(http.MethodPost, "/me",
-		strings.NewReader(url.Values{"email": {"evil@example.com"}, "name": {"Evil"}}.Encode()))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req := newRequest(http.MethodPost, "/me", url.Values{"email": {"evil@example.com"}, "name": {"Evil"}})
 	req.Header.Set("Sec-Fetch-Site", "cross-site")
-	req.AddCookie(c.cookie)
+	wantStatus(t, c.send(req), http.StatusForbidden)
 
-	rec := httptest.NewRecorder()
-	c.handler.ServeHTTP(rec, req)
-	wantStatus(t, rec, http.StatusForbidden)
+	// The profile did not change.
+	wantContains(t, c.get("/me"), "<dd>bob@example.com</dd>")
 }
 
+// TestCSRFOriginFallback covers an older browser without Sec-Fetch-Site.
+// The guard then compares the Origin header with the host of the request.
 func TestCSRFOriginFallback(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
-	for _, tc := range []struct {
+	tests := []struct {
 		origin string
-		status int
+		want   int
 	}{
 		{"http://example.com", http.StatusSeeOther},
 		{"http://evil.example", http.StatusForbidden},
 		{"null", http.StatusForbidden},
-	} {
-		req := httptest.NewRequest(http.MethodPost, "http://example.com/logout", nil)
-		req.Header.Set("Origin", tc.origin)
-		rec := httptest.NewRecorder()
-		c.handler.ServeHTTP(rec, req)
-		wantStatus(t, rec, tc.status)
+	}
+	for _, tt := range tests {
+		t.Run(tt.origin, func(t *testing.T) {
+			req := newRequest(http.MethodPost, "http://example.com/logout", nil)
+			req.Header.Set("Origin", tt.origin)
+			wantStatus(t, c.send(req), tt.want)
+		})
 	}
 }
 
@@ -105,7 +103,7 @@ func TestSecurityHeaders(t *testing.T) {
 func TestPrivateResponsesDisableCaching(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
-	c.register("cache@example.com", "Cache", "s3cret-pass")
+	c.register("bob@example.com", "Bob", "s3cret-pass")
 	for _, htmx := range []bool{false, true} {
 		for _, path := range []string{"/me", "/notes", "/not-found"} {
 			rec := c.do(http.MethodGet, path, nil, htmx)
@@ -134,11 +132,13 @@ func TestRequestBodyLimit(t *testing.T) {
 func TestInvalidTextReturnsValidationError(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
-	c.register("text@example.com", "Text", "s3cret-pass")
+	c.register("bob@example.com", "Bob", "s3cret-pass")
 	for _, text := range []string{"nul\x00", "utf8\xff"} {
 		for _, htmx := range []bool{false, true} {
-			wantStatus(t, c.do(http.MethodPost, "/notes", url.Values{"text": {text}}, htmx), http.StatusUnprocessableEntity)
-			wantStatus(t, c.do(http.MethodPost, "/me", url.Values{"email": {"text@example.com"}, "name": {text}}, htmx), http.StatusUnprocessableEntity)
+			rec := c.do(http.MethodPost, "/notes", url.Values{"text": {text}}, htmx)
+			wantStatus(t, rec, http.StatusUnprocessableEntity)
+			rec = c.do(http.MethodPost, "/me", url.Values{"email": {"bob@example.com"}, "name": {text}}, htmx)
+			wantStatus(t, rec, http.StatusUnprocessableEntity)
 		}
 	}
 }
@@ -146,8 +146,8 @@ func TestInvalidTextReturnsValidationError(t *testing.T) {
 func TestNotesEscapeHTML(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
-	c.register("escape@example.com", "Escape", "s3cret-pass")
-	rec := c.do(http.MethodPost, "/notes", url.Values{"text": {`<script>alert("x")</script>`}}, true)
+	c.register("bob@example.com", "Bob", "s3cret-pass")
+	rec := c.htmxPost("/notes", url.Values{"text": {`<script>alert("x")</script>`}})
 	wantStatus(t, rec, http.StatusOK)
 	wantContains(t, rec, "&lt;script&gt;")
 	if strings.Contains(rec.Body.String(), "<script>") {

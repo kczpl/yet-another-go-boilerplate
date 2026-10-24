@@ -24,6 +24,8 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
 - Schema changes are picked up automatically: the template name includes a
   hash of the embedded migrations. Setup and cleanup have finite deadlines.
   The postgres-test service uses the test profile and tmpfs.
+- `testdb.New` opens the pool with `database.Connect`, so tests get the
+  production pool settings, for example `statement_timeout`.
 
 ## The Race Detector
 
@@ -39,12 +41,29 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   codes, redirects, and rendered HTML. Test both paths for every mutation:
   htmx (fragment swap) and the plain form (redirect / full page) —
   including delete (`POST /notes/{id}/delete`). The files:
-  - `client_test.go` — the test client and the shared helpers (`newClient`,
-    `register`, `postForm`, `wantStatus`, `wantContains`, `wantLocation`).
+  - `client_test.go` — the test client and the shared helpers. Use them
+    instead of a hand-made request or recorder:
+    - Build: `newClient`, `newClientWithModels`, `register`.
+    - Send: `get`, `postForm` (the no-JS path), `htmxGet` and `htmxPost`
+      (the htmx path), `do`, and `send` with `newRequest` for custom
+      headers.
+    - Check: `wantStatus`, `wantContains`, `wantLocation`, `wantBody`
+      (an exact body, such as an event stream), `wantPage` (a full
+      page), and `wantFragment` (a bare htmx fragment).
   - `auth_test.go` — login, logout, the session cookie flags, the login
     rate limit, and the guard.
-  - `profile_test.go`, `notes_test.go` — one file per feature. A new
-    feature adds `internal/app/<name>_test.go`.
+  - `profile_test.go`, `notes_test.go`, `chat_test.go`,
+    `triage_test.go` — one file per feature. A new feature adds
+    `internal/app/<name>_test.go`. `profile_test.go` also has
+    `TestDashboardEmbedsFeatures`: each dashboard card loads its fragment
+    with htmx and falls back to a full page.
+    `chat_test.go` checks the exact event stream, the no-JS page, a model
+    failure on both paths, and the chat rate limit.
+    `TestChatOutlivesWriteTimeout` runs the full handler
+    on a real server with a short `WriteTimeout`, because only a real
+    connection has a write deadline.
+  - `models_test.go` — `app.NewModels`: both default models answer, and a
+    model of a provider without its key stops startup.
   - `health_test.go` — the probes and the static assets.
   - `security_test.go` — the security invariants.
 - `newClient` loads the production config (an empty environment), so the
@@ -60,6 +79,19 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
 - `internal/<feature>/service_test.go` — business logic + SQL against a real
   database. Service tests exercise the repo; don't duplicate them with
   repo-only tests unless a query has behavior the service doesn't reach.
+- A feature without storage (`internal/chat`, `internal/triage`) tests
+  its service with a stub `llm.Provider` (or `systemone.Provider`) and no
+  database.
+- A provider adapter (`internal/platform/llm/anthropic`,
+  `internal/platform/systemone/typesafe`) tests the request mapping, the
+  response parsing, and the error path against an `httptest.Server`. An
+  error must not contain the key. `TestNewIgnoresEnvironment` uses
+  `t.Setenv`, so it does not run in parallel.
+- Tests never call a live model. The production config of the tests uses
+  `fake/echo` (`llm.Fake`, no delay) and `fake/uniform`
+  (`systemone.Fake`). To test a failure, pass a stub provider to
+  `newClientWithModels`: `newClientWithModels(t, app.Models{LLM:
+  failingModel{}})`. A nil field keeps the configured model.
 - Pure helpers (e.g. password hashing) get white-box tests in the same
   package when the functions are deliberately unexported.
 
@@ -76,7 +108,10 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
 - Use `t.Context()` for test operations and `t.Cleanup` for cleanup.
   The test context is canceled before cleanup starts. Cleanup that uses
   the database must use a fresh context with a finite deadline.
-- Never `time.Sleep` to wait for anything; synchronize explicitly.
+- Never `time.Sleep` to wait for anything; synchronize explicitly. The
+  exceptions are `TestEventStreamOutlivesServerTimeouts` and
+  `TestChatOutlivesWriteTimeout`: they must wait past a real server
+  deadline, so the deadline itself is the condition.
 - Test files sit next to the code they test — there is no separate `tests/`
   tree.
 

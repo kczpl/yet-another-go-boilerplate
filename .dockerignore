@@ -2,7 +2,6 @@
 .github
 .env
 .agents
-.claude
 bin
 *.md
 docker-compose.yml

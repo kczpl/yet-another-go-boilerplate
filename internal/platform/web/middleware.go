@@ -102,7 +102,8 @@ func recoverResponse(logger *slog.Logger, w *statusRecorder, r *http.Request) {
 	RespondError(logger, w, r, fmt.Errorf("handler panic: %v", cause))
 }
 
-// statusRecorder captures the status code for the request log.
+// statusRecorder captures the final status code for the request log. It
+// also tells RecoverPanics and E if the response started.
 type statusRecorder struct {
 	http.ResponseWriter
 	status      int

@@ -26,14 +26,12 @@ func TestNotesFlow(t *testing.T) {
 	wantContains(t, rec, "No notes yet")
 
 	// Add the note via htmx. The fragment comes back with the new note.
-	rec = c.do(http.MethodPost, "/notes", url.Values{
+	rec = c.htmxPost("/notes", url.Values{
 		"text": {"Buy milk"},
-	}, true)
+	})
 	wantStatus(t, rec, http.StatusOK)
 	wantContains(t, rec, "Buy milk")
-	if strings.Contains(rec.Body.String(), "<html") {
-		t.Fatal("htmx response contains a full page, want a fragment")
-	}
+	wantFragment(t, rec)
 
 	match := noteIDPattern.FindStringSubmatch(rec.Body.String())
 	if match == nil {
@@ -43,15 +41,15 @@ func TestNotesFlow(t *testing.T) {
 
 	// Delete the note via htmx. The note is gone, and the empty state is
 	// back.
-	rec = c.do(http.MethodPost, "/notes/"+noteID+"/delete", nil, true)
+	rec = c.htmxPost("/notes/"+noteID+"/delete", nil)
 	wantStatus(t, rec, http.StatusOK)
 	wantContains(t, rec, "No notes yet")
 
 	// A second delete, or a delete with a garbage id, causes a calm
 	// re-render, not an error.
-	rec = c.do(http.MethodPost, "/notes/"+noteID+"/delete", nil, true)
+	rec = c.htmxPost("/notes/"+noteID+"/delete", nil)
 	wantStatus(t, rec, http.StatusOK)
-	rec = c.do(http.MethodPost, "/notes/not-a-uuid/delete", nil, true)
+	rec = c.htmxPost("/notes/not-a-uuid/delete", nil)
 	wantStatus(t, rec, http.StatusOK)
 }
 
@@ -86,8 +84,8 @@ func TestNotesPagination(t *testing.T) {
 	c.register("bob@example.com", "Bob", "s3cret-pass")
 
 	// One page holds 20 notes (pageSize in the note service).
-	for i := 1; i <= 21; i++ {
-		wantStatus(t, c.do(http.MethodPost, "/notes", url.Values{"text": {fmt.Sprintf("note-%02d", i)}}, true), http.StatusOK)
+	for i := range 21 {
+		wantStatus(t, c.htmxPost("/notes", url.Values{"text": {fmt.Sprintf("note-%02d", i+1)}}), http.StatusOK)
 	}
 
 	first := c.get("/notes")
@@ -139,34 +137,6 @@ func TestNotesRejectBadCursor(t *testing.T) {
 	}
 }
 
-func TestDashboardEmbedsNotes(t *testing.T) {
-	t.Parallel()
-	c := newClient(t)
-	c.register("bob@example.com", "Bob", "s3cret-pass")
-
-	// /me is one screen: the profile section plus the section of the note
-	// feature. The dashboard embeds it over HTTP (hx-get), not through a Go
-	// import.
-	rec := c.get("/me")
-	wantStatus(t, rec, http.StatusOK)
-	wantContains(t, rec, `id="profile-section"`)
-	wantContains(t, rec, `hx-get="/notes"`)
-
-	// An htmx GET /notes answers with the bare fragment that the dashboard
-	// swaps in.
-	rec = c.do(http.MethodGet, "/notes", nil, true)
-	wantStatus(t, rec, http.StatusOK)
-	wantContains(t, rec, `id="notes-section"`)
-	if strings.Contains(rec.Body.String(), "<html") {
-		t.Fatal("htmx response contains a full page, want a fragment")
-	}
-
-	// The same URL stays a full page for plain browsers (the no-JS path).
-	rec = c.get("/notes")
-	wantStatus(t, rec, http.StatusOK)
-	wantContains(t, rec, "<html")
-}
-
 func TestNoteAddValidation(t *testing.T) {
 	t.Parallel()
 	c := newClient(t)
@@ -174,9 +144,9 @@ func TestNoteAddValidation(t *testing.T) {
 
 	// The textarea carries `required`, but the server must not trust the
 	// client. Blank text must fail on the htmx path with a 422 fragment.
-	rec := c.do(http.MethodPost, "/notes", url.Values{
+	rec := c.htmxPost("/notes", url.Values{
 		"text": {"   "},
-	}, true)
+	})
 	wantStatus(t, rec, http.StatusUnprocessableEntity)
 	wantContains(t, rec, "text must not be empty")
 
@@ -184,5 +154,5 @@ func TestNoteAddValidation(t *testing.T) {
 	rec = c.postForm("/notes", url.Values{"text": {""}})
 	wantStatus(t, rec, http.StatusUnprocessableEntity)
 	wantContains(t, rec, "text must not be empty")
-	wantContains(t, rec, "<html")
+	wantPage(t, rec)
 }

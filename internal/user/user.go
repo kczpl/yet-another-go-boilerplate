@@ -20,6 +20,7 @@ var (
 // users, so handlers render it directly in forms.
 type ValidationError string
 
+// Error implements the error interface.
 func (e ValidationError) Error() string { return string(e) }
 
 // User is one row in the users table. The ID is a plain string.

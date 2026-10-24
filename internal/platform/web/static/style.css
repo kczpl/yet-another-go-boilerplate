@@ -224,3 +224,22 @@ nav.pager .older { margin-left: auto; }
 /* Dim the section while an htmx request is in flight. The delay prevents
    flicker on quick swaps. */
 .htmx-request { opacity: 0.6; transition: opacity 0.2s ease 0.1s; }
+
+/* ---------- chat ---------- */
+
+/* Keep the line breaks of the answer. Wrap long words. Hide the box until
+   the answer has text. */
+.answer {
+  margin-top: 1.25rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.answer:empty { display: none; }
+
+/* ---------- triage ---------- */
+
+/* The decision follows the form, so it needs space above it. */
+dl.decision { margin: 1.25rem 0 0; }

@@ -18,10 +18,12 @@ type Repo struct {
 
 var _ Repository = (*Repo)(nil)
 
+// NewRepo returns a Repo that runs its queries on db.
 func NewRepo(db *pgxpool.Pool) *Repo {
 	return &Repo{db: db}
 }
 
+// Insert implements Repository.
 func (r *Repo) Insert(ctx context.Context, userID, tokenHash string, ttl time.Duration, keep int) error {
 	args := pgx.NamedArgs{
 		"token_hash": tokenHash,
@@ -56,6 +58,7 @@ func (r *Repo) Insert(ctx context.Context, userID, tokenHash string, ttl time.Du
 	return nil
 }
 
+// Get implements Repository.
 func (r *Repo) Get(ctx context.Context, tokenHash string) (Session, error) {
 	// SQL enforces expiry, in one place.
 	rows, _ := r.db.Query(ctx, `
@@ -73,6 +76,7 @@ func (r *Repo) Get(ctx context.Context, tokenHash string) (Session, error) {
 	return session, nil
 }
 
+// Delete implements Repository.
 func (r *Repo) Delete(ctx context.Context, tokenHash string) error {
 	_, err := r.db.Exec(ctx,
 		"DELETE FROM sessions WHERE token_hash = @token_hash",
@@ -83,6 +87,7 @@ func (r *Repo) Delete(ctx context.Context, tokenHash string) error {
 	return nil
 }
 
+// DeleteExpired implements Repository.
 func (r *Repo) DeleteExpired(ctx context.Context) error {
 	_, err := r.db.Exec(ctx, `
 		DELETE FROM sessions WHERE token_hash IN (

@@ -10,9 +10,12 @@ Style and structure rules for this codebase. The vendored `go` skill
 rules take precedence where the skill differs: retain `internal/`,
 feature-local HTTP code, repository interfaces, and stdlib-first tests.
 Do not add Afero, go-cmp, or another dependency solely because the skill
-suggests it. pgx remains the only direct application dependency. The files in
-`.agents/rules/` are the single source of truth for conventions —
-`README.md` and `AGENTS.md` only summarize them.
+suggests it. The application has two direct dependencies: pgx and the
+official Anthropic Go SDK. Only `internal/platform/llm/anthropic` imports
+the SDK (see Model Providers). The files in
+`.agents/rules/` are the single source of truth for conventions.
+`AGENTS.md` and `README.md` point to them and do not repeat them. Change
+a convention here, not there.
 
 ## Package Layout: Features, Not Layers
 
@@ -20,18 +23,25 @@ suggests it. pgx remains the only direct application dependency. The files in
 cmd/api/            main + run() + serve(); subcommands migrate, adduser; debug
                     listener; no business logic
 migrations/         embedded SQL, append-only; new files are timestamp-prefixed
-internal/platform/  shared infrastructure: config, database, logging, web
-internal/app/       composition — the only place that wires features
+internal/platform/  shared infrastructure: config, database, logging, web,
+                    llm, systemone; one subpackage per model provider
+                    (llm/anthropic, systemone/typesafe)
+internal/app/       composition — the only place that wires features;
+                    models.go registers the model providers
 internal/auth/      sessions; knows users only as id strings
-internal/user/      feature slice (also owns login — it needs user.Service)
+internal/user/      feature slice (also owns login and the /me dashboard)
 internal/note/      feature slice — copy this one for a new feature
+internal/chat/      feature slice without storage — the LLM + SSE example
+internal/triage/    feature slice without storage — the System One example
 internal/testdb/    test databases
 ```
 
 - A new feature = a new package `internal/<name>`. Copy `internal/note/` and
   adapt. Keep the file split: `<name>.go` (types + errors), `service.go`,
   `repository.go` (interface), `postgres.go` (implementation), `http.go`
-  (routes + handlers), `templates/`, `service_test.go`.
+  (routes + handlers), `templates/`, `service_test.go`. A feature that
+  stores nothing (`internal/chat`, `internal/triage`) omits
+  `repository.go` and `postgres.go`; its package doc says why.
 - Layers live as **files inside a feature package**, never as layer-named
   packages (`services/`, `repositories/`, `handlers/`, `models/` are banned).
 - Grow a feature with more files, not with subpackages. When a canonical
@@ -58,7 +68,21 @@ internal/testdb/    test databases
    `Routes` (see http.md).
 5. Write `service_test.go` (business rules + SQL) and add
    `internal/app/<name>_test.go` (user-visible flows, see testing.md).
-6. `just ci` must pass.
+6. To show the feature on the `/me` dashboard, add an `hx-get`
+   placeholder to `internal/user/templates/me.html` (see http.md).
+7. `just ci` must pass.
+
+A feature that stores nothing skips step 1 and omits `repository.go` and
+`postgres.go`. Copy `internal/chat` (LLM) or `internal/triage` (System
+One) when the feature calls a model. Such a feature also needs:
+
+- The provider and the model reference in its constructor:
+  `triage.NewService(models.SystemOne, cfg.SystemOneModel)`.
+- Its prompt or its questions, the input caps, and the timeout of the
+  call in `service.go` (see Call a Model).
+- A `web.RateLimiter` from `app.New`, because each call costs money.
+- Service tests with a stub `Provider` and HTTP tests with the fake
+  model (see testing.md).
 
 ## Services: Business Logic
 
@@ -117,7 +141,7 @@ the service:
 ## Dependency Injection
 
 - Explicit constructor injection only: `NewRepo(pool)`, `NewService(repo)`,
-  `app.New(logger, cfg, pool)`. Adding a dependency means adding a
+  `app.New(logger, cfg, pool, models)`. Adding a dependency means adding a
   parameter — the compiler then finds every wiring point.
 - No DI frameworks, no package-level mutable state, no `init()`.
   Package-level values are limited to error sentinels, embedded files, and
@@ -132,12 +156,118 @@ the service:
   `ENVIRONMENT=development` when `.env` does not set it.
 - `Config.Validate` must reject hard misconfiguration (unknown
   `ENVIRONMENT`, unknown `LOG_LEVEL`, missing `DATABASE_URL` outside
-  development, invalid `PORT`, a `DEBUG_ADDR` that is not loopback). The
+  development, invalid `PORT`, a `DEBUG_ADDR` that is not loopback, an
+  `LLM_MODEL` or a `SYSTEMONE_MODEL` without the form `provider/model`). The
   service refuses to start. It never uses a silent fallback. Extend
   `Validate` when you add a config field with constraints.
 - Repository interfaces are defined in the feature (`repository.go`), next
   to their consumer (`Service`), and implemented in `postgres.go`. Keep
   `var _ Repository = (*Repo)(nil)` as the compile-time check.
+
+## Model Providers
+
+- The app has two kinds of model. They serve different purposes, so each
+  kind has its own core package, its own providers, and its own default
+  model:
+  - An **LLM** writes text: an answer, a summary, a draft. The core is
+    `internal/platform/llm`. `LLM_MODEL` sets the default model
+    (`fake/echo`).
+  - A **System One** model judges a state. It picks an option (choice),
+    places the state on a scale (score), or checks a statement (noul),
+    and it returns calibrated probabilities. TypeSafe Jev and Clef are
+    examples. The core is `internal/platform/systemone`.
+    `SYSTEMONE_MODEL` sets the default model (`fake/uniform`).
+- Keep the two kinds apart. Do not add fields to `llm.Request` for a
+  System One model, and do not add text generation to `systemone`. Keep
+  the cores neutral: do not add a field to a request for one vendor.
+- The template has one real provider of each kind:
+  `internal/platform/llm/anthropic` (Claude, through the official SDK)
+  and `internal/platform/systemone/typesafe` (Jev, through `net/http`).
+- `app.NewModels` (`internal/app/models.go`) returns `app.Models{LLM,
+  SystemOne}`. `newLLM` and `newSystemOne` register the providers of each
+  kind and resolve the default model at startup. A real provider is
+  registered only when its key is set (`ANTHROPIC_API_KEY`,
+  `TYPESAFE_API_KEY` in `.env`). When the default model names a provider
+  that is not registered, the startup stops, and the error names the key.
+- A feature takes only the kind of model that it needs, together with its
+  default model: `chat.NewService(models.LLM, cfg.LLMModel)`. A feature
+  that needs both kinds takes both providers. Features depend only on
+  `llm.Provider` or `systemone.Provider`. A feature never imports a
+  provider package or an SDK.
+- When a feature needs a model other than the default, add a config
+  field such as `SUMMARY_MODEL` with the same `provider/model` check in
+  `Validate`, and pass it to the constructor of the feature.
+- A model reference has the form `provider/model`
+  (`anthropic/claude-opus-5-5`, `typesafe/jev-latest`). Each Router cuts
+  at the first slash, so the model part can contain more slashes.
+
+### LLM
+
+- `internal/platform/llm` has `Provider` (one `Stream(ctx, req, onText)`
+  method), `Generate`, `Router`, and `Fake`.
+- A feature owns its prompt and its cost caps: the system prompt, the
+  input length, and `MaxTokens` live in its `service.go` (see
+  `internal/chat`). `llm.Fake` rejects a request without `MaxTokens`, so
+  a feature that forgets the cap fails its tests. The chat cap is 4096
+  tokens. On a model with thinking, the thinking tokens count toward the
+  cap too.
+
+### System One
+
+- `internal/platform/systemone` has `Provider` (one `Ask(ctx, req)`
+  method), `Router`, and `Fake`. A request holds the model, the state,
+  and the questions by id. Send structured state as JSON text. The
+  response holds one answer for each question id, the exact model
+  version, and the usage.
+- `systemone.Fake` (`fake/uniform`) knows nothing: each option and each
+  level gets the same probability, the confidence is zero, and a noul is
+  0.5. It rejects the requests that a real provider rejects: no state, no
+  questions, no instructions, a choice with fewer than 2 options, or a
+  score with fewer than 2 levels.
+- A feature owns its questions and their meaning: the instructions, the
+  options, the levels, and the thresholds for a decision live in its
+  `service.go`.
+
+### Call a Model
+
+- The feature sets the deadline of each call with `context.WithTimeout`
+  in its `service.go` (`answerTimeout` in chat, `triageTimeout` in
+  triage). The call also ends when the client leaves.
+- The adapter owns the retries. The Anthropic SDK retries a rate limit
+  and a server error two times. The TypeSafe adapter does not retry.
+- Never call a model inside a database transaction. The transaction then
+  holds a connection and its locks for the whole call.
+- Check the output of a model like user input. `triage.decide` rejects an
+  unknown option and a probability outside 0..1.
+- Log only the usage counts and the model version. Never log a key, a
+  prompt, a state, or an answer.
+
+### Add a Provider
+
+1. Create `internal/platform/llm/<name>/` or
+   `internal/platform/systemone/<name>/` with a type that implements the
+   `Provider` of that core. Map the values of the provider to the core
+   types (`llm.StopReason`, `systemone.QuestionType`), and fill `Usage`.
+   The constructor takes all its values: `New(baseURL, apiKey string)`.
+   Tests then point it at an `httptest.Server`.
+2. An SDK reads its own environment variables by default. Turn that off
+   (`option.WithoutEnvironmentDefaults()` in the Anthropic SDK), because
+   only `config.Load` reads the environment. A provider error must not
+   contain the key or the request text.
+3. Add the key to `Config`, `config.Load`, `.env.example`, and the `api`
+   environment in `docker-compose.yml`. Extend `Validate` when a field
+   has constraints. A cloud provider (Bedrock, Vertex) uses the
+   credential chain of its cloud; then add its region or endpoint
+   instead of a key.
+4. Register the provider in `newLLM` or `newSystemOne` only when its key
+   or endpoint is set. Name the key in the startup error.
+5. Test the request mapping, the response parsing, and the error path
+   against an `httptest.Server`. Tests never call a live model.
+
+Use the official Go SDK of a provider when one exists. Keep the SDK
+import inside the provider package, and record the dependency in
+`docs/third-party.md`. Without a Go SDK (TypeSafe has only Python and
+JavaScript SDKs), call the HTTP API with `net/http`.
 
 ## Errors
 
@@ -190,15 +320,17 @@ This template optimizes for readability and agentic editing, not DRY:
 
 ## Use Current Go
 
-- `go.mod` pins the version (currently 1.26.8) and is authoritative. When
-  bumping, keep the Dockerfile (`golang:1.xx.y`) and AGENTS.md in sync.
+- `go.mod` pins the version (currently 1.27.3) and is authoritative. When
+  bumping, keep the Dockerfile (`golang:1.xx.y`) and the Go badge in
+  README.md in sync.
 - Use: `any`, `for i := range n`, `min`/`max`, `cmp.Or` for defaults,
   `slices`/`maps`, `math/rand/v2`, `errors.Join`, `crypto/pbkdf2`,
   `http.CrossOriginProtection`, `http.MaxBytesHandler`.
 - Loop variables are per-iteration — never write `x := x` captures.
 - `gofmt -l -w .` before finishing any task. `just lint` must pass — it
-  runs `go vet`, staticcheck (version-pinned in the justfile), and the
-  gofmt check.
+  runs `go vet`, `go fix -diff` (the Go modernizers; run `go fix ./...`
+  to apply them), staticcheck with all checks (version-pinned in the
+  justfile), and the gofmt check.
 
 ## Development Checks
 
@@ -210,6 +342,6 @@ This template optimizes for readability and agentic editing, not DRY:
   Keep tests readable; do not split them merely to lower a score.
 - `just ci` runs lint, types, complexity, race tests, and govulncheck.
   Tool versions live in the justfile. Keep tools outside the application
-  module to preserve the single direct dependency.
+  module, so they do not add dependencies to `go.mod`.
 - CI also builds the Docker image. Update the Go patch version in go.mod
   and Dockerfile together when security fixes arrive.

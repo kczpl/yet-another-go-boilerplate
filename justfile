@@ -1,9 +1,9 @@
 set dotenv-load
 set positional-arguments
 
-staticcheck_version := "v0.8.1"
-gocognit_version := "v1.2.1"
-govulncheck_version := "v1.8.0"
+staticcheck_version := "v0.8.2"
+gocognit_version := "v1.3.0"
+govulncheck_version := "v1.9.0"
 
 default:
   @just --list
@@ -26,10 +26,13 @@ build:
 fmt:
   gofmt -l -w .
 
-# Run the analyzers and check the format.
+# Run the analyzers and check the format. go fix -diff fails when a Go
+# modernizer can update the code: run go fix ./... to apply the changes.
+# staticcheck runs all checks, the style checks (ST) included.
 lint:
   go vet ./...
-  go run honnef.co/go/tools/cmd/staticcheck@{{staticcheck_version}} ./...
+  go fix -diff ./...
+  go run honnef.co/go/tools/cmd/staticcheck@{{staticcheck_version}} -checks all ./...
   @unformatted="$(gofmt -l .)"; if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
 
 # Compile all packages and tests without a database.

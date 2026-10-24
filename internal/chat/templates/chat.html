@@ -1,0 +1,32 @@
+{{define "content"}}
+<div class="narrow">
+  <header class="page-head">
+    <h1>Chat</h1>
+    <p class="muted"><a href="/me">← Back to the dashboard</a></p>
+  </header>
+  {{template "chat-section" .}}
+</div>
+{{end}}
+
+{{/* The dashboard embeds this section with hx-get. */}}
+{{define "chat-section"}}
+<section id="chat-section" class="card">
+  <h2>Chat</h2>
+  <p class="muted">An LLM writes the answer, and the server streams it over SSE. Model: <code>{{.Model}}</code> (LLM_MODEL).</p>
+  {{with .Error}}<p class="notice error">{{.}}</p>{{end}}
+
+  {{/* static/app.js reads data-stream: it posts the form with fetch and
+       streams the answer into #answer. Without JavaScript, the form posts
+       normally and the server renders the complete answer. */}}
+  <form method="post" action="/chat" data-stream="#answer">
+    <div class="field">
+      <label for="question">Question</label>
+      <textarea id="question" name="question" rows="3" required placeholder="Ask a question">{{.Question}}</textarea>
+    </div>
+    <button type="submit">Ask</button>
+  </form>
+
+  {{/* No space inside the element: the CSS hides it while it is empty. */}}
+  <div id="answer" class="answer" aria-live="polite">{{.Answer}}</div>
+</section>
+{{end}}

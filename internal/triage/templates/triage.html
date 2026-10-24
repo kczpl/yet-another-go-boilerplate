@@ -1,0 +1,42 @@
+{{define "content"}}
+<div class="narrow">
+  <header class="page-head">
+    <h1>Triage</h1>
+    <p class="muted"><a href="/me">← Back to the dashboard</a></p>
+  </header>
+  {{template "triage-section" .}}
+</div>
+{{end}}
+
+{{/* This is the single htmx swap target. POST /triage re-renders this
+     whole section, both with a decision and on validation errors. The
+     dashboard embeds the section with hx-get. */}}
+{{define "triage-section"}}
+<section id="triage-section" class="card">
+  <h2>Triage</h2>
+  <p class="muted">A System One model routes a support message with calibrated probabilities. Model: <code>{{.Model}}</code> (SYSTEMONE_MODEL).</p>
+  {{with .Error}}<p class="notice error">{{.}}</p>{{end}}
+
+  <form method="post" action="/triage"
+        hx-post="/triage" hx-target="#triage-section" hx-swap="outerHTML">
+    <div class="field">
+      <label for="message">Message</label>
+      <textarea id="message" name="message" rows="5" required placeholder="Paste a support message">{{.Message}}</textarea>
+    </div>
+    <button type="submit">Triage</button>
+  </form>
+
+  {{with .Decision}}
+  <dl class="decision">
+    <dt>Queue</dt>
+    <dd>{{.Queue}}{{if eq .Queue "review"}}: the model is not sure, so a person picks the queue{{end}}</dd>
+    <dt>Confidence</dt>
+    <dd>{{printf "%.2f" .Confidence}}</dd>
+    <dt>Urgent</dt>
+    <dd>{{if .Urgent}}yes{{else}}no{{end}} (probability {{printf "%.2f" .Urgency}})</dd>
+    <dt>Model</dt>
+    <dd>{{.Model}}</dd>
+  </dl>
+  {{end}}
+</section>
+{{end}}

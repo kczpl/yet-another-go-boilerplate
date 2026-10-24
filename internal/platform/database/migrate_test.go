@@ -23,18 +23,18 @@ func TestMigrateConcurrentAndLateFiles(t *testing.T) {
 	}
 	for range 2 {
 		if err := <-results; err != nil {
-			t.Fatal(err)
+			t.Fatalf("parallel Migrate: %v", err)
 		}
 	}
 	files["9001_late.sql"] = &fstest.MapFile{Data: []byte("INSERT INTO migration_probe VALUES (1)")}
 	for range 2 {
 		if err := database.Migrate(t.Context(), pool, files); err != nil {
-			t.Fatal(err)
+			t.Fatalf("Migrate with a late file: %v", err)
 		}
 	}
 	var count int
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM migration_probe").Scan(&count); err != nil {
-		t.Fatal(err)
+		t.Fatalf("counting probe rows: %v", err)
 	}
 	if count != 1 {
 		t.Fatalf("late migration inserted %d rows, want 1", count)
@@ -50,14 +50,14 @@ func TestMigrateRollsBackFailedFile(t *testing.T) {
 	}
 	var absent bool
 	if err := pool.QueryRow(t.Context(), "SELECT to_regclass('rollback_probe') IS NULL").Scan(&absent); err != nil {
-		t.Fatal(err)
+		t.Fatalf("checking the probe table: %v", err)
 	}
 	if !absent {
 		t.Fatal("failed migration left its table behind")
 	}
 	var count int
 	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM schema_migrations WHERE filename = '9001_failure.sql'").Scan(&count); err != nil {
-		t.Fatal(err)
+		t.Fatalf("counting applied files: %v", err)
 	}
 	if count != 0 {
 		t.Fatal("failed migration was recorded as applied")
@@ -74,7 +74,7 @@ func TestMigrateIgnoresStatementTimeout(t *testing.T) {
 	logger := logging.New(io.Discard, slog.LevelInfo, logging.JSON)
 	pool, err := database.Connect(t.Context(), withParam(t, base, "statement_timeout", "50ms"), logger)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("Connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
 
@@ -98,11 +98,11 @@ func TestMigrateCancellationReleasesLock(t *testing.T) {
 		t.Fatalf("error = %v, want context cancellation", err)
 	}
 	if err := database.Migrate(t.Context(), pool, files); err != nil {
-		t.Fatal(err)
+		t.Fatalf("Migrate after the cancellation: %v", err)
 	}
 	var locks int
 	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&locks); err != nil {
-		t.Fatal(err)
+		t.Fatalf("counting advisory locks: %v", err)
 	}
 	if locks != 0 {
 		t.Fatalf("migration retained %d advisory locks", locks)

@@ -33,6 +33,24 @@ type Config struct {
 	// listener, for example localhost:6060. Empty disables the listener.
 	DebugAddr string
 
+	// LLMModel is the default text model of the app as "provider/model",
+	// for example "anthropic/claude-opus-5-5". The default "fake/echo"
+	// needs no network and no credentials. internal/app/models.go registers
+	// the providers.
+	LLMModel string
+
+	// SystemOneModel is the default System One model of the app as
+	// "provider/model", for example "typesafe/jev-latest". The default
+	// "fake/uniform" needs no network and no credentials.
+	// internal/app/models.go registers the providers.
+	SystemOneModel string
+
+	// The API keys of the model providers. internal/app/models.go gives
+	// each key only to the constructor of its provider and registers the
+	// provider only when the key is set. Never log a key.
+	AnthropicAPIKey string
+	TypeSafeAPIKey  string
+
 	// logLevelInput keeps the raw LOG_LEVEL value for Validate. A typo
 	// must stop startup, not silently mean info.
 	logLevelInput string
@@ -42,14 +60,18 @@ type Config struct {
 // their own getenv. Only development gets a default DATABASE_URL.
 func Load(getenv func(string) string) Config {
 	cfg := Config{
-		Env:            cmp.Or(getenv("ENVIRONMENT"), "production"),
-		LogLevel:       parseLogLevel(getenv("LOG_LEVEL")),
-		Host:           cmp.Or(getenv("HOST"), "localhost"),
-		Port:           cmp.Or(getenv("PORT"), "8080"),
-		DatabaseURL:    getenv("DATABASE_URL"),
-		ClientIPHeader: getenv("CLIENT_IP_HEADER"),
-		DebugAddr:      getenv("DEBUG_ADDR"),
-		logLevelInput:  getenv("LOG_LEVEL"),
+		Env:             cmp.Or(getenv("ENVIRONMENT"), "production"),
+		LogLevel:        parseLogLevel(getenv("LOG_LEVEL")),
+		Host:            cmp.Or(getenv("HOST"), "localhost"),
+		Port:            cmp.Or(getenv("PORT"), "8080"),
+		DatabaseURL:     getenv("DATABASE_URL"),
+		ClientIPHeader:  getenv("CLIENT_IP_HEADER"),
+		DebugAddr:       getenv("DEBUG_ADDR"),
+		LLMModel:        cmp.Or(getenv("LLM_MODEL"), "fake/echo"),
+		SystemOneModel:  cmp.Or(getenv("SYSTEMONE_MODEL"), "fake/uniform"),
+		AnthropicAPIKey: getenv("ANTHROPIC_API_KEY"),
+		TypeSafeAPIKey:  getenv("TYPESAFE_API_KEY"),
+		logLevelInput:   getenv("LOG_LEVEL"),
 	}
 	// A development convenience only. Validate keeps the other
 	// environments explicit.
@@ -82,6 +104,12 @@ func (c Config) Validate() error {
 	}
 	if c.DebugAddr != "" && !isLoopback(c.DebugAddr) {
 		errs = append(errs, fmt.Errorf("DEBUG_ADDR must be a loopback host:port such as localhost:6060, got %q", c.DebugAddr))
+	}
+	if !isModelRef(c.LLMModel) {
+		errs = append(errs, fmt.Errorf("LLM_MODEL must have the form provider/model, got %q", c.LLMModel))
+	}
+	if !isModelRef(c.SystemOneModel) {
+		errs = append(errs, fmt.Errorf("SYSTEMONE_MODEL must have the form provider/model, got %q", c.SystemOneModel))
 	}
 	return errors.Join(errs...)
 }
@@ -116,4 +144,11 @@ func isLoopback(addr string) bool {
 	}
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.IsLoopback()
+}
+
+// isModelRef reports whether ref has the form "provider/model" with two
+// parts that are not empty.
+func isModelRef(ref string) bool {
+	provider, model, ok := strings.Cut(ref, "/")
+	return ok && provider != "" && model != ""
 }

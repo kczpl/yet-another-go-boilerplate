@@ -72,7 +72,7 @@ func handleLoginPage() web.HandlerE {
 			return nil
 		}
 		return web.RenderPage(w, http.StatusOK, loginTmpl, loginData{
-			Page: web.Page{Title: "Log in"},
+			Title: "Log in",
 		})
 	}
 }
@@ -88,7 +88,7 @@ func handleLogin(svc *Service, sessions *auth.Service) web.HandlerE {
 		u, err := svc.Authenticate(r.Context(), email, r.FormValue("password"))
 		if errors.Is(err, ErrInvalidCredentials) {
 			return web.RenderPage(w, http.StatusUnauthorized, loginTmpl, loginData{
-				Page:  web.Page{Title: "Log in"},
+				Title: "Log in",
 				Email: email,
 				Error: err.Error(),
 			})
@@ -112,9 +112,10 @@ func handleMe(svc *Service) web.HandlerE {
 			return err
 		}
 		return web.RenderPage(w, http.StatusOK, meTmpl, meData{
-			Page: web.Page{Title: "Home", LoggedIn: true},
-			User: u,
-			Form: profileForm{Email: u.Email, Name: u.Name},
+			Title:    "Home",
+			LoggedIn: true,
+			User:     u,
+			Form:     profileForm{Email: u.Email, Name: u.Name},
 			// The PRG flash: the no-JS update redirects to /me?saved=1.
 			Saved: r.URL.Query().Get("saved") == "1",
 		})
@@ -145,19 +146,21 @@ func handleMeUpdate(svc *Service) web.HandlerE {
 				return getErr
 			}
 			data := meData{
-				Page:  web.Page{Title: "Home", LoggedIn: true},
-				User:  current,
-				Form:  form,
-				Error: msg,
+				Title:    "Home",
+				LoggedIn: true,
+				User:     current,
+				Form:     form,
+				Error:    msg,
 			}
 			return respondProfile(w, r, http.StatusUnprocessableEntity, data)
 		}
 
 		return respondProfile(w, r, http.StatusOK, meData{
-			Page:  web.Page{Title: "Home", LoggedIn: true},
-			User:  u,
-			Form:  profileForm{Email: u.Email, Name: u.Name},
-			Saved: true,
+			Title:    "Home",
+			LoggedIn: true,
+			User:     u,
+			Form:     profileForm{Email: u.Email, Name: u.Name},
+			Saved:    true,
 		})
 	}
 }
@@ -176,8 +179,7 @@ func respondProfile(w http.ResponseWriter, r *http.Request, status int, data meD
 // formError maps service errors to a message that is safe to show in the
 // form. The value ok is false for internal errors.
 func formError(err error) (msg string, ok bool) {
-	var vErr ValidationError
-	if errors.As(err, &vErr) {
+	if vErr, ok := errors.AsType[ValidationError](err); ok {
 		return vErr.Error(), true
 	}
 	if errors.Is(err, ErrEmailTaken) {

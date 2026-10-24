@@ -19,12 +19,14 @@ type Repo struct {
 
 var _ Repository = (*Repo)(nil)
 
+// NewRepo returns a Repo that runs its queries on db.
 func NewRepo(db *pgxpool.Pool) *Repo {
 	return &Repo{db: db}
 }
 
 const userColumns = "id, email, name, password_hash, created_at, updated_at"
 
+// Insert implements Repository.
 func (r *Repo) Insert(ctx context.Context, email, name, passwordHash string) (User, error) {
 	rows, _ := r.db.Query(ctx, `
 		INSERT INTO users (email, name, password_hash)
@@ -45,6 +47,7 @@ func (r *Repo) Insert(ctx context.Context, email, name, passwordHash string) (Us
 	return u, nil
 }
 
+// GetByID implements Repository.
 func (r *Repo) GetByID(ctx context.Context, id string) (User, error) {
 	rows, _ := r.db.Query(ctx,
 		"SELECT "+userColumns+" FROM users WHERE id = @id",
@@ -59,6 +62,7 @@ func (r *Repo) GetByID(ctx context.Context, id string) (User, error) {
 	return u, nil
 }
 
+// GetByEmail implements Repository.
 func (r *Repo) GetByEmail(ctx context.Context, email string) (User, error) {
 	rows, _ := r.db.Query(ctx,
 		"SELECT "+userColumns+" FROM users WHERE lower(email) = lower(@email)",
@@ -73,6 +77,7 @@ func (r *Repo) GetByEmail(ctx context.Context, email string) (User, error) {
 	return u, nil
 }
 
+// Update implements Repository.
 func (r *Repo) Update(ctx context.Context, id, email, name string) (User, error) {
 	rows, _ := r.db.Query(ctx, `
 		UPDATE users
@@ -98,6 +103,6 @@ func (r *Repo) Update(ctx context.Context, id, email, name string) (User, error)
 }
 
 func isUniqueViolation(err error) bool {
-	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+	pgErr, ok := errors.AsType[*pgconn.PgError](err)
+	return ok && pgErr.Code == "23505"
 }
