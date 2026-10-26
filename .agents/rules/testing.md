@@ -66,7 +66,8 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
     provider registers with its key or its URL, and a model of a provider
     without its key stops startup.
   - `worker_test.go` — `app.NewWorker` as `cmd/api worker` wires it: the
-    hourly schedule enqueues the session cleanup, and the cleanup runs.
+    hourly schedule sends the session cleanup to the auth queue of the
+    migrations, and the cleanup runs.
   - `health_test.go` — the probes and the static assets.
   - `security_test.go` — the security invariants.
 - `newClient` loads the production config (an empty environment), so the
@@ -92,17 +93,23 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   error must not contain the key or the request text. An error event in
   the stream and a line over the cap also need a test.
   `TestNewKeepsTheBasePath` checks the Bedrock route (`/anthropic/`).
-- The job queue (`internal/platform/jobs`) tests against a real database.
-  A test drives the worker with `RunDue`: it enqueues the due schedule
-  slots, runs the cleanup, and then runs the due jobs one at a time. A
-  test never waits for a backoff or a lease. It moves `run_at` or
-  `locked_until` with SQL (`makeDue`). `export_test.go` gives the tests
-  `SetClock` (the clock of the schedules), `SetShutdownGrace`, and
-  `CleanupBatch`. Keep the tests of these invariants: many workers run
-  each job once, a stale worker cannot store a result, an expired lease
-  returns the job, the cleanup works in batches, each schedule slot
-  enqueues one job, the logs omit the payload, and a shutdown finishes the
-  running jobs or returns them without the cost of an attempt.
+- The job queue (`internal/platform/queue`) tests against PgQue in a real
+  database. Each test creates its own queue and consumer with SQL
+  (`newPool`). A test drives the worker with `RunDue`: it sends the due
+  schedule slots, runs the maintenance, forces a tick on each consumed
+  queue, and runs every ready batch. A test never waits for a backoff: it
+  moves `ev_retry_after` of `pgque.retry_queue` with SQL
+  (`makeRetriesDue`). A test of `Run` sets short intervals with
+  `SetIntervals` and waits for a handler signal or a log record, never
+  for time. `export_test.go` also gives the tests `SetClock` (the clock
+  of the schedules), `SetShutdownGrace`, and `WorkerLockID`. Keep the
+  tests of these invariants: a send joins the transaction, a failure
+  retries only its message with the backoff and then goes to the dead
+  letter queue, `Permanent` skips the retries, each schedule slot goes
+  out once across workers, one worker is active and another worker takes
+  over, a lost lock stops the handlers, the maintenance rotates the
+  tables and purges old dead letters, the logs omit the payload, and a
+  shutdown finishes the batch or returns it without the cost of a retry.
 - A feature with jobs tests the rules in `service_test.go` and the
   wiring through `app.NewWorker` and `RunDue` in
   `internal/app/worker_test.go`.

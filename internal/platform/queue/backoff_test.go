@@ -1,4 +1,4 @@
-package jobs
+package queue
 
 import (
 	"errors"
@@ -11,23 +11,45 @@ import (
 func TestBackoffGrowsToOneHour(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		attempt int
+		retries int
 		base    time.Duration
 	}{
+		{-1, 15 * time.Second},
 		{0, 15 * time.Second},
-		{1, 15 * time.Second},
-		{2, 30 * time.Second},
-		{3, time.Minute},
-		{8, 32 * time.Minute},
-		{9, time.Hour},
+		{1, 30 * time.Second},
+		{2, time.Minute},
+		{7, 32 * time.Minute},
+		{8, time.Hour},
 		{50, time.Hour},
 	}
 	for _, tt := range tests {
 		for range 20 {
-			got := backoff(tt.attempt)
+			got := backoff(tt.retries)
 			if got < tt.base || got >= tt.base+tt.base/4 {
-				t.Fatalf("backoff(%d) = %v, want [%v, %v)", tt.attempt, got, tt.base, tt.base+tt.base/4)
+				t.Fatalf("backoff(%d) = %v, want [%v, %v)", tt.retries, got, tt.base, tt.base+tt.base/4)
 			}
+		}
+	}
+}
+
+func TestValidName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"auth.delete_expired_sessions", true},
+		{"a", true},
+		{strings.Repeat("a", 57), true},
+		{"", false},
+		{strings.Repeat("a", 58), false},
+		{"Auth.delete", false},
+		{"auth delete", false},
+		{"auth-delete", false},
+	}
+	for _, tt := range tests {
+		if got := validName(tt.name); got != tt.want {
+			t.Errorf("validName(%q) = %v, want %v", tt.name, got, tt.want)
 		}
 	}
 }

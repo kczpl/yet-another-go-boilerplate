@@ -17,8 +17,9 @@ frameworks, no ORM, no DI container, no mocks.
 
 **One direct dependency: pgx.** Sessions, password hashing, CSRF
 protection, rate limits, Server-Sent Events, templates, and migrations
-come from the standard library. The background job queue runs on
-PostgreSQL through pgx. Every model provider (Anthropic, Bedrock,
+come from the standard library. Background jobs run on
+[PgQue](https://pgque.dev), a queue in PostgreSQL that a migration
+installs as plain SQL; the worker calls it through pgx. Every model provider (Anthropic, Bedrock,
 Mistral, xAI, local servers, TypeSafe) calls its API with `net/http` and
 uses no SDK. `go.mod` pins the Go version, and the Dockerfile uses the
 same one.
@@ -103,13 +104,14 @@ the code easy to read for a person and easy to change for a coding agent.
 
 ```
 cmd/api/            main: config → pool → migrate → app.New → server; subcommands: migrate, adduser, worker
-migrations/         embedded SQL migrations, applied on startup (append-only, timestamp-named)
+migrations/         embedded SQL migrations, applied on startup (append-only, timestamp-named);
+                    one of them installs PgQue
 internal/
   platform/         shared infrastructure — features import it, it imports no feature
     config/         env-driven configuration
     database/       pgx pool + embedded SQL migrator
     logging/        slog construction + context-carried log attributes
-    jobs/           background job queue on PostgreSQL: retries, schedules, leases
+    queue/          background jobs on PgQue: consumers, retries, schedules, one active worker
     llm/            provider-neutral core for text models; anthropic/ (Claude, Bedrock),
                     chatcompletions/ (Mistral, xAI, local servers); both on net/http
     systemone/      provider-neutral core for System One models; typesafe/ (net/http)
@@ -377,81 +379,105 @@ step-by-step list is "Add a Provider" in
 
 ## Background jobs
 
-The template has a job queue on PostgreSQL
-([`internal/platform/jobs`](internal/platform/jobs)). It needs no broker
-and no extra dependency. The same binary runs the HTTP server and the
-worker:
+Background jobs run on [PgQue](https://pgque.dev)
+([source](https://github.com/NikolayS/pgque)), a message queue in
+PostgreSQL. PgQue is plain SQL and PL/pgSQL: a migration installs it, and
+it needs no extension, no broker, and no extra Go module.
+[`internal/platform/queue`](internal/platform/queue) calls its SQL API
+with pgx. The same binary runs the HTTP server and the worker:
 
 ```bash
-just worker                                                   # the worker on the host
-docker compose up --build --scale worker=3 api worker postgres   # three worker replicas
+just worker                                                      # the worker on the host
+docker compose up --build --scale worker=3 api worker postgres   # one active worker, two that wait
 ```
 
-### How a job moves through the queue
+### How a message moves through PgQue
 
-A job is one row in the `jobs` table. Its `status` column moves through
-four values:
+PgQue keeps a log of messages, not a table of job rows. A producer adds a
+message to a queue. A consumer is a named cursor on the queue. A tick
+marks a position in the log, and the messages between two ticks are one
+batch. The consumer reads a batch, handles each message, and finishes the
+batch. Then its cursor moves past the batch.
 
 ```
-                    claim           nil
-Enqueue ──► queued ──────► running ──────► done ──► deleted after 24 h
-              ▲               │  │
-              │    retry      │  │ jobs.Permanent, or
-              └───────────────┘  │ no attempts left
-                                 ▼
-                               failed ──► deleted after 7 days
+         send               tick             next_batch               ack
+producer ─────► queue log ─────► batch ────────────► consumer ─────► the cursor moves on
+                    ▲                                    │
+                    │ due after the backoff              │ handler error
+                    └──── retry queue ◄─── pgque.nack ◄──┤
+                                                         │ no retries left, or queue.Permanent
+                                                         └──► dead letter queue (kept 7 days)
 ```
 
-1. **Enqueue.** `jobs.Enqueue` inserts a `queued` row with a `run_at`
-   time. A schedule slot inserts the same kind of row.
-2. **Claim.** An idle worker takes the oldest due row of a kind that it
-   handles. One `UPDATE` sets the status to `running`, adds 1 to
-   `attempts`, and sets the lease `locked_until`. The claim commits at
-   once, so no transaction stays open while the handler runs.
-3. **Run.** The worker calls the handler. The context of the handler ends
-   at the timeout of its kind.
-4. **Store.** The worker writes the result: `done`, `queued` with a later
-   `run_at` (a retry), or `failed`. The `UPDATE` must match the attempt
-   number of the claim, so a stale worker changes nothing.
-5. **Recover and clean up.** Every minute, each worker returns the
-   `running` jobs with an expired lease to the queue. When such a job has
-   no attempts left, it becomes `failed`. The same cleanup deletes the old
-   `done` and `failed` rows.
+1. **Send.** `queue.Send` calls `pgque.send` in the transaction of the
+   write. A schedule slot sends a message in the same way.
+2. **Tick.** The active worker calls `pgque.ticker()` every second.
+   PgQue makes a tick when a queue has new messages and its tick lag (3 s
+   by default) has passed, or when 500 messages wait.
+3. **Batch.** After a tick, each consumer opens its next batch
+   (`pgque.next_batch`) and reads all its messages.
+4. **Handle.** The worker calls the handler of each message type, in
+   order. The context of a handler ends at the timeout of its type.
+5. **Finish.** One transaction stores the results. A failed message goes
+   to the retry queue (`pgque.nack`) or to the dead letter queue. Then
+   `pgque.ack` closes the batch. A rollback leaves the batch open, so the
+   next call delivers the whole batch again.
+6. **Maintain.** Every 10 seconds, the active worker moves the due
+   retries back to their queues, runs the table rotation of PgQue, and
+   deletes the dead letters that are older than 7 days.
 
-A shutdown (SIGTERM) and an expired lease also return a `running` job to
-`queued`. One worker process runs 4 claim loops and one maintenance loop.
-A claim loop runs one job at a time and waits one second when no job is
-due. The maintenance loop enqueues the due schedule slots every second
-and runs the cleanup every minute.
+PgQue does not update or delete a message row. Each queue writes into
+three tables, and PgQue empties the oldest table with `TRUNCATE` when all
+consumers are past it (every 2 hours by default). The queue tables collect
+no dead rows, so they need no autovacuum tuning.
 
-### Enqueue a job
+### Create a queue
 
-A feature enqueues a job in the repository method that writes its rows,
-in the same transaction. The job then exists only when the rows exist:
+Each feature has its own queue with the name of the feature. A migration
+creates the queue and subscribes the consumer of the worker. Subscribe the
+consumer before the first message: a new consumer does not see the older
+messages.
+
+```sql
+-- migrations/20261026215435_create_auth_queue.sql
+SELECT pgque.create_queue('auth');
+SELECT pgque.subscribe('auth', 'worker');
+-- Optional: the retry limit (default 5) and a shorter tick lag (default 3 s).
+-- SELECT pgque.set_queue_config('auth', 'max_retries', '10');
+-- SELECT pgque.set_queue_config('auth', 'ticker_max_lag', '500 milliseconds');
+```
+
+`Run` and `RunDue` stop with an error when a consumer has no
+subscription.
+
+### Send a message
+
+A feature sends a message in the repository method that writes its rows,
+in the same transaction. The message then exists only when the rows exist:
 
 ```go
 // internal/toy/postgres.go
 err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
 	// ... INSERT INTO toys ...
-	_, err := jobs.Enqueue(ctx, tx, jobs.Params{
-		Kind:    "toy.send_receipt",
-		Payload: receipt{ToyID: toy.ID}, // ids, never secrets
-		RunAt:   time.Now().Add(time.Hour), // optional: a delayed job
-	})
+	_, err := queue.Send(ctx, tx, "toy", "toy.send_receipt", receipt{ToyID: toy.ID}) // ids, never secrets
 	return err
 })
 ```
 
-### Handle a job
+PgQue 0.2 has no delayed delivery: a message goes out after the next
+tick.
 
-A feature registers its handlers in `jobs.go`, as it registers its routes
-in `http.go`. The session cleanup is the example
+### Handle a message
+
+A feature registers its consumer and its handlers in `jobs.go`, as it
+registers its routes in `http.go`. The session cleanup is the example
 ([`internal/auth/jobs.go`](internal/auth/jobs.go)):
 
 ```go
-func Jobs(w *jobs.Worker, svc *Service) {
-	w.Handle("auth.delete_expired_sessions", time.Minute, handleDeleteExpired(svc))
-	w.Schedule("auth.delete_expired_sessions", time.Hour, 0) // every hour, on the hour (UTC)
+func Jobs(w *queue.Worker, svc *Service) {
+	c := w.Consumer("auth", "worker")
+	c.Handle("auth.delete_expired_sessions", time.Minute, handleDeleteExpired(svc))
+	w.Schedule("auth", "auth.delete_expired_sessions", time.Hour, 0) // every hour, on the hour (UTC)
 }
 ```
 
@@ -461,127 +487,132 @@ the `Jobs` function of each feature. It is the wiring point of the jobs, as
 
 ### Retries, schedules, and shutdown
 
-- **Retries.** A handler error retries the job after a backoff: 15 s,
-  30 s, 1 min, and so on, up to 1 hour, plus up to 25 % random jitter.
-  After `MaxAttempts` runs (default 10), the job stays in the table with
-  the status `failed` and its last error. `jobs.Permanent(err)` stops the
-  retries at once, for example for a bad payload.
-- **Schedules.** `Schedule(kind, every, offset)` enqueues one job in each
-  slot, in UTC. `every = 24h` and `offset = 3h` run the job daily at
-  03:00 UTC. A slot that the workers missed while they were down does not
-  run later. A slot is skipped while a job of that kind is still queued or
-  running, so two runs of one schedule never overlap.
-- **Timeouts and leases.** Each handler has its own timeout. A running job
-  has a lease: the timeout plus 30 s. When a worker crashes, the lease
-  expires, and another worker runs the job again.
-- **Shutdown.** On SIGTERM, a worker stops its claims and gives the
-  running jobs 10 s. Then it cancels their contexts, and the jobs return
-  to the queue at once. A stopped run does not count as an attempt, so a
-  deploy cannot fail a job. The compose `stop_grace_period` of the worker
-  is 15 s for this reason.
-- **Cleanup.** The workers delete done jobs after 24 hours and failed jobs
-  after 7 days.
+- **Retries.** A handler error sends the message back with `pgque.nack`
+  after a backoff: 15 s, 30 s, 1 min, and so on, up to 1 hour, plus up to
+  25 % random jitter. After the retry limit of the queue (`max_retries`,
+  default 5), the message goes to the dead letter queue with the error
+  text as its reason. `queue.Permanent(err)` sends it there at once, for
+  example for a bad payload. A panic and a timeout count as errors.
+- **One failure, one retry.** A failure retries only its own message. The
+  other messages of the batch are done.
+- **A type without a handler** also retries and then goes to the dead
+  letter queue. A consumer must handle every message type of its queue.
+- **Schedules.** `Schedule(queue, type, every, offset)` sends one message
+  in each slot, in UTC. `every = 24h` and `offset = 3h` send it daily at
+  03:00 UTC. The row of the type in `job_schedules` keeps the last slot,
+  so each slot goes out once, also when another worker becomes active. A
+  slot that no worker saw does not run later. PgQue has no scheduler, so
+  this table is the only state of the template outside PgQue.
+- **Shutdown.** On SIGTERM, the worker stops opening batches and gives the
+  running handlers 10 s. Then it cancels their contexts. A batch with a
+  stopped handler stays open and comes back to the next active worker as
+  a whole. The stopped run does not count as a retry, so a deploy cannot
+  send a message to the dead letter queue. The compose
+  `stop_grace_period` of the worker is 15 s for this reason.
 
-To run a failed job again, raise its attempt limit. Do not reset
-`attempts`, because the attempt number protects the job against a stale
-worker:
+To run a dead letter again, replay it. It goes back to its queue as a new
+message:
 
 ```sql
-UPDATE jobs
-SET status = 'queued', run_at = now(), max_attempts = attempts + 1, updated_at = now()
-WHERE id = '...' AND status = 'failed';
+SELECT dl_id, dl_reason, ev_type, ev_data FROM pgque.dlq_inspect('auth');
+SELECT pgque.dlq_replay(42);                 -- one dead letter
+SELECT * FROM pgque.dlq_replay_all('auth');  -- all dead letters of the queue
 ```
 
 ### Many replicas, one database
 
-Three worker containers (or more) can share one PostgreSQL:
+PgQue gives a batch to a consumer, not to a process: two processes that
+read the same consumer get the same batch. So only one worker is active:
 
-- The claim uses `FOR UPDATE SKIP LOCKED`. Each job goes to one worker,
-  and the workers do not wait for each other.
-- Each schedule slot is one conditional upsert in `job_schedules`. Only
-  the replica that wins the upsert enqueues the job, so the workers need
-  no leader.
-- The result of a run is stored only when the attempt number still
-  matches. A worker that lost its lease cannot overwrite a newer run.
-- A worker claims only the kinds that it handles. During a rolling
-  deploy, an old replica leaves a new kind for a new replica.
+- Each worker tries to take a session advisory lock. The worker with the
+  lock is active: it runs the ticker, the maintenance, the schedules, and
+  the consumers. Each consumer runs in its own goroutine, one batch at a
+  time.
+- The other workers wait and try again every 5 seconds. When the active
+  worker stops or its database session ends, the lock is free, and a
+  waiting worker takes over.
+- An active worker that loses its lock connection stops its handlers at
+  once. Their batches stay open for the next active worker.
 
 Keep these points in mind:
 
-- **Delivery is at least once.** A crash or an expired lease runs a job
-  again. Write each handler so that a second run is safe.
-- **Connections.** Each process has its own pool (the pgx default is the
-  larger of 4 and the number of CPUs; set `pool_max_conns` in
-  `DATABASE_URL` to change it). Keep the sum over all API and worker
-  replicas below `max_connections` of PostgreSQL.
-- **Polling.** Each idle claim loop asks for a job once per second (4 loops
-  per worker). The query uses a partial index, so the cost is small. A due
-  job starts within about one second.
+- **Delivery is at least once.** A crash or a stop in the middle of a
+  batch delivers the whole batch again, also the messages that were done.
+  Write each handler so that a second run is safe.
+- **More replicas give failover, not throughput.** The messages of one
+  consumer run one after another in one process. To spread the load, give
+  a feature its own queue. PgQue has cooperative consumers for parallel
+  work on one queue, but they are experimental in PgQue 0.2, and the
+  template does not use them.
+- **Connections.** The active worker keeps one pool connection for the
+  lock. Each process has its own pool (the pgx default is the larger of 4
+  and the number of CPUs; set `pool_max_conns` in `DATABASE_URL` to change
+  it). Keep the sum over all API and worker replicas below
+  `max_connections` of PostgreSQL.
 - **Payloads and logs.** Store ids in a payload, not secrets or private
-  text. The worker logs the kind, the id, the attempt, and the error of a
-  run, never the payload. Keep private text out of the handler errors too:
-  the `jobs` table stores the last error.
+  text. The worker logs the queue, the consumer, the message id, the type,
+  the retry count, and the error, never the payload. The dead letter queue
+  stores the error text, so keep private text out of the handler errors.
+- **One ticker.** The active worker drives PgQue. Do not also start the
+  pg_cron jobs of PgQue (`pgque.start()`).
 
 ### Operate the queue
 
-The worker has no metrics endpoint. The `jobs` table is the source of
-truth, so watch it with SQL from your monitoring system:
+The worker has no metrics endpoint. PgQue has SQL functions for
+monitoring:
 
 ```sql
--- The number of jobs in each state, by kind.
-SELECT kind, status, count(*) FROM jobs GROUP BY kind, status;
+-- The queues: the time since the last tick and the new messages.
+SELECT queue_name, ticker_lag, ev_new, last_tick_id FROM pgque.get_queue_info();
 
--- The wait time of the oldest due job, by kind.
-SELECT kind, now() - min(run_at) AS waiting
-FROM jobs
-WHERE status = 'queued' AND run_at <= now()
-GROUP BY kind;
+-- The consumers: the age of the finished position and the waiting messages.
+SELECT queue_name, consumer_name, lag, last_seen, pending_events FROM pgque.get_consumer_info();
 
--- The last failed jobs and their errors.
-SELECT id, kind, attempts, last_error, updated_at
-FROM jobs
-WHERE status = 'failed'
-ORDER BY updated_at DESC
-LIMIT 50;
+-- The last dead letters of a queue and their reasons.
+SELECT dl_time, ev_type, dl_reason FROM pgque.dlq_inspect('auth', 50);
 ```
 
 Set alerts on these signals:
 
-- **A due job waits too long**, for example more than 5 minutes (the
-  second query). This alert finds a stopped worker, workers that cannot
-  keep up, and a kind without a handler.
-- **A job failed.** The worker logs `job failed` at ERROR. The cleanup
-  deletes a failed row after 7 days, so the alert must come before that.
-- **Leases expire often.** The WARN record `jobs recovered after an
-  expired lease` means that a worker crashed or a handler ran longer than
-  its lease.
+- **A consumer falls behind.** Its `lag` grows, for example over 5
+  minutes. This alert finds a stopped worker and a worker that cannot keep
+  up. An idle queue ticks less often (down to once per minute), so allow
+  for that.
+- **A message went to the dead letter queue.** The worker logs `message
+  failed; it goes to the dead letter queue` at ERROR. The maintenance
+  deletes a dead letter after 7 days, so the alert must come before that.
+- **The worker lost its lock.** The ERROR record `worker lost the worker
+  lock` means that the database session of the active worker ended.
 
 Know these limits before you depend on the queue:
 
 - **A handler must return when its context ends.** Go cannot stop a
   goroutine from the outside. A handler that ignores its context blocks
-  one claim loop until the process exits. The lease expires, and another
-  worker runs the job again, but the first process now has one loop less.
-  The worker has no health endpoint, so the orchestrator does not restart
-  it. At shutdown, the worker logs `worker stopped; a handler ignored the
-  end of its context` at ERROR.
-- **A kind without a handler waits forever.** A worker claims only the
-  kinds that it handles, and the cleanup does not delete queued rows. To
-  remove a kind, delete its queued rows with SQL. Many such rows also slow
-  down the claim, because the claim index does not contain the kind.
-- **The queue is a busy table.** Each job causes one insert, at least two
-  updates, and one delete. Autovacuum removes the dead rows. A long
-  transaction anywhere in the database blocks the vacuum, and the claims
-  become slower. Under a high load, tune autovacuum for the `jobs` table.
-- **Latency.** A due job starts within about one second. After a worker
-  crash, the job runs again when its lease expires (the timeout plus
-  30 s) and the next cleanup runs (up to 1 minute later).
-- **Throughput.** The template has no load test. A queue of this design
-  on PostgreSQL usually handles hundreds of jobs per second. For a much
-  higher rate, use a dedicated message broker.
-- **Not included:** priorities, unique jobs, job chains, a cancel
-  operation, LISTEN/NOTIFY, and an admin page. Add one only when a feature
-  needs it.
+  its consumer until the process exits. At shutdown, the worker logs `a
+  handler ignored the end of its context` at ERROR.
+- **Latency.** A message usually starts 1 to 4 seconds after the commit:
+  the tick lag of its queue plus the tick period. Set a shorter
+  `ticker_max_lag` on a queue for a shorter wait. A retry starts up to 10
+  seconds after its backoff.
+- **A batch stays in memory.** The worker reads a whole batch at once,
+  and a burst between two ticks makes a large batch. Keep payloads small.
+- **Not included:** priorities, delayed messages, unique messages, a
+  cancel operation, LISTEN/NOTIFY wakeups, and an admin page. Add one only
+  when a feature needs it.
+
+### Roles and upgrades
+
+The install migration creates three roles: `pgque_reader`,
+`pgque_writer`, and `pgque_admin`. A role belongs to the server, not to
+one database, so the role that runs the migrations needs `CREATEROLE`, or
+an administrator creates the three roles first. The app and the worker use
+the role that owns the migrations, so they can call every PgQue function.
+With separate roles, the API needs `pgque_writer`, and the worker needs
+`pgque_admin`: the ticker and the maintenance are admin functions.
+
+To upgrade PgQue, add a migration with the `sql/pgque.sql` file of the
+new release. The file upgrades an install in place. Record the version and
+the checksum in [`docs/third-party.md`](docs/third-party.md).
 
 ## Testing
 
@@ -616,7 +647,7 @@ new migration rebuilds the template automatically.
 | Business rules + SQL | `internal/<feature>/service_test.go` | validation, ownership, pages — against a real database |
 | Model features | `internal/chat`, `internal/triage` | prompt, caps, and decisions with a stub provider, no database |
 | Provider adapters | `internal/platform/llm/anthropic`, `llm/chatcompletions`, `systemone/typesafe` | request mapping, response parsing, errors without the key — against `httptest.Server` |
-| Job queue | `internal/platform/jobs`, `internal/app/worker_test.go` | claims, retries, leases, schedules, shutdown, many workers — against a real database |
+| Job queue | `internal/platform/queue`, `internal/app/worker_test.go` | send, retries, dead letters, schedules, maintenance, shutdown, one active worker — against PgQue in a real database |
 | Platform | `internal/platform/*`, `cmd/api` | migrator, middleware, config, SSE, startup |
 
 A flow test reads like a user session. The test client in
@@ -704,7 +735,7 @@ ideas; the rules hold the details.
 | [`testing.md`](.agents/rules/testing.md) | a real database per test, what to test where, the checks |
 | [`security.md`](.agents/rules/security.md) | sessions, passwords, CSRF, headers, rate limits, the production checklist |
 
-Third-party code (pgx, htmx, the vendored skills) is listed
+Third-party code (pgx, PgQue, htmx, the vendored skills) is listed
 in [`docs/third-party.md`](docs/third-party.md).
 
 ## Working with AI agents
@@ -742,6 +773,9 @@ generic unit of work. Point the orchestrator at `/livez` (liveness, no
 database) and `/readyz` (readiness, a database ping). Run the worker as a
 separate deployment (`api worker`) with a stop grace period of at least
 15 s, and set the alerts from [Operate the queue](#operate-the-queue).
+The PgQue migration creates three database roles, so the role that runs
+the migrations needs `CREATEROLE` (see [Roles and
+upgrades](#roles-and-upgrades)).
 Before a public deployment, work through "Not Included — Add Before
 Production" in [`.agents/rules/security.md`](.agents/rules/security.md):
 TLS, limits for many replicas, a model budget, metrics, backups, and

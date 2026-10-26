@@ -186,8 +186,11 @@ purpose.
   URL.
 - A job payload holds ids and small values, never a key, a password, a
   token, a prompt, or private text. The worker never logs a payload. The
-  log and `jobs.last_error` get the error of a failed run, so keep private
-  text out of job errors.
+  log and the reason of a dead letter (`pgque.dead_letter`) get the error
+  of a failed run, so keep private text out of job errors.
+- PgQue roles are global: `pgque_reader` can read the batches of every
+  consumer. Do not grant the PgQue roles to an application that you do not
+  trust.
 
 ## Not Included — Add Before Production
 
@@ -209,15 +212,21 @@ them before you expose the app publicly:
   `LLM_MODEL` and `SYSTEMONE_MODEL` to real models, or remove
   `internal/chat` and `internal/triage`.
 - **A worker deployment.** Run `api worker` as its own deployment with a
-  stop grace period of at least 15 s. Without a worker, the jobs stay
-  queued, and the expired sessions stay in the table.
+  stop grace period of at least 15 s. One worker is active; a second
+  replica takes over when it stops. Without a worker, PgQue makes no
+  ticks, the messages wait, and the expired sessions stay in the table.
 - **Metrics and tracing.** The app has structured logs, probes, and a
   loopback pprof/expvar listener. Add metrics and tracing as the
-  deployment needs them. Alert on the `job failed` log record (ERROR) or
-  on the rows with `status = 'failed'` in `jobs`. Also alert when the
-  oldest due job waits too long: a worker stopped, or a kind has no
-  handler. README "Operate the queue" has the queries.
+  deployment needs them. Alert on the `message failed; it goes to the
+  dead letter queue` log record (ERROR) or on new rows in
+  `pgque.dead_letter`. Also alert when the `lag` of a consumer
+  (`pgque.get_consumer_info()`) grows: no worker is active, or it cannot
+  keep up. README "Operate the queue" has the queries.
 - **Backups, secret management, and monitoring of the database.**
 - **Separate database roles.** The app and the worker apply migrations
-  at startup, so their database role needs DDL rights. To run the app with a role without
-  DDL rights, move the migrations to a separate deploy step.
+  at startup, so their database role needs DDL rights. The PgQue
+  migration also creates the roles `pgque_reader`, `pgque_writer`, and
+  `pgque_admin`, so that role needs `CREATEROLE`, or an administrator
+  creates the three roles first. To run the app with a role without DDL
+  rights, move the migrations to a separate deploy step. Then grant
+  `pgque_writer` to the API role and `pgque_admin` to the worker role.
