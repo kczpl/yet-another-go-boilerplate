@@ -12,8 +12,9 @@ feature-local HTTP code, repository interfaces, and stdlib-first tests.
 Do not add Afero, go-cmp, or another dependency solely because the skill
 suggests it. The application has one direct dependency: pgx. The model
 providers call their APIs with `net/http` and use no SDK (see Model
-Providers). The job queue (`internal/platform/jobs`) uses only pgx and
-the standard library. The files in
+Providers). The job queue (`internal/platform/queue`) calls the SQL API
+of PgQue with pgx; PgQue itself is a vendored SQL migration, not a Go
+module. Do not add a PgQue client module. The files in
 `.agents/rules/` are the single source of truth for conventions.
 `AGENTS.md` and `README.md` point to them and do not repeat them. Change
 a convention here, not there.
@@ -23,9 +24,10 @@ a convention here, not there.
 ```
 cmd/api/            main + run() + serve(); subcommands migrate, adduser,
                     worker; debug listener; no business logic
-migrations/         embedded SQL, append-only; new files are timestamp-prefixed
+migrations/         embedded SQL, append-only; new files are timestamp-prefixed;
+                    *_install_pgque.sql is vendored PgQue
 internal/platform/  shared infrastructure: config, database, logging, web,
-                    jobs, llm, systemone; one subpackage per provider API
+                    queue, llm, systemone; one subpackage per provider API
                     (llm/anthropic, llm/chatcompletions, systemone/typesafe)
 internal/app/       composition — the only place that wires features:
                     app.go the routes, worker.go the jobs; models.go
@@ -77,7 +79,8 @@ internal/testdb/    test databases
    `internal/app/<name>_test.go` (user-visible flows, see testing.md).
 6. To show the feature on the `/me` dashboard, add an `hx-get`
    placeholder to `internal/user/templates/me.html` (see http.md).
-7. If the feature has background jobs, add `jobs.go` and call
+7. If the feature has background jobs, add a migration that creates its
+   queue and subscribes `worker`, add `jobs.go`, and call
    `<name>.Jobs(w, svc)` in `app.NewWorker` (see Background Jobs).
 8. `just ci` must pass.
 
@@ -306,70 +309,93 @@ dependency in `docs/third-party.md`.
 
 ## Background Jobs
 
-`internal/platform/jobs` is a job queue on PostgreSQL. The `worker`
-subcommand of `cmd/api` runs it. Use a job for work that must not block a
-request, for a call to another service that needs retries, and for
-scheduled work.
+Background jobs run on PgQue (https://pgque.dev), a message queue in
+PostgreSQL. The migration `*_install_pgque.sql` installs PgQue 0.2.2 as
+plain SQL; it is vendored without changes (see `docs/third-party.md`).
+`internal/platform/queue` calls the SQL API of PgQue with pgx. The
+`worker` subcommand of `cmd/api` runs it. Use a job for work that must not
+block a request, for a call to another service that needs retries, and
+for scheduled work.
 
-- **Register.** A feature puts its handlers and its schedules in
-  `jobs.go`: `func Jobs(w *jobs.Worker, svc *Service)`. This is the same
-  shape as `Routes`. `app.NewWorker` (`internal/app/worker.go`) constructs
-  the services and calls each `Jobs`. It is the only wiring point of the
-  jobs. The example is `internal/auth/jobs.go`.
-- **Kinds.** A kind has the form `<feature>.<action>`, for example
-  `auth.delete_expired_sessions`. Keep it in a constant in `jobs.go`. A
-  kind has 1 to 100 characters: `a-z`, `0-9`, `_`, and `.`. A worker
-  claims only the kinds that it handles, so a kind without a handler stays
-  queued. To rename a kind, add the new kind and keep the old handler
-  until no old job is queued.
+- **Queues.** Each feature with jobs has its own queue with the name of
+  the feature, and the worker reads it as the consumer `worker`. A
+  migration creates both: `SELECT pgque.create_queue('toy'); SELECT
+  pgque.subscribe('toy', 'worker');`. Subscribe before the first send: a
+  new consumer does not see older messages. `Run` and `RunDue` fail when a
+  consumer has no subscription. Set `max_retries` (default 5) or
+  `ticker_max_lag` (default 3 s) with `pgque.set_queue_config` in the
+  same migration when the defaults do not fit.
+- **Register.** A feature puts its consumer, its handlers, and its
+  schedules in `jobs.go`: `func Jobs(w *queue.Worker, svc *Service)`.
+  This is the same shape as `Routes`. Keep the queue name, the consumer
+  name, and each message type in constants there. `app.NewWorker`
+  (`internal/app/worker.go`) constructs the services and calls each
+  `Jobs`. It is the only wiring point of the jobs. The example is
+  `internal/auth/jobs.go`.
+- **Types.** A message type has the form `<feature>.<action>`, for example
+  `auth.delete_expired_sessions`. It has 1 to 57 characters: `a-z`,
+  `0-9`, `_`, and `.`. A consumer gets every message of its queue, so it
+  must handle every type of the queue. A type without a handler retries
+  and then goes to the dead letter queue. To rename a type, add the new
+  type and keep the old handler until no old message waits.
 - **Handlers.** A handler is a maker function that closes over the
-  service and returns `jobs.Handler`, like an HTTP handler. It decodes
+  service and returns `queue.Handler`, like an HTTP handler. It decodes
   the payload, calls the service, and returns the error. The business
   rules stay in `service.go`. A handler does not log its error: the worker
   logs each result once.
-- **Idempotency.** Delivery is at least once. A crash, a deploy, or an
-  expired lease runs a job again. Make a second run safe: check the state
-  first, use an upsert, or send the job id as the idempotency key to an
-  external service.
-- **Errors.** An error retries the job after a backoff: 15 s, doubled on
-  each attempt, up to 1 h, plus up to 25 % jitter. After `MaxAttempts`
-  runs (default 10), the job fails. Wrap an error that a retry cannot fix
-  with `jobs.Permanent` (a bad payload, a deleted row). A panic counts as
-  an error. The log and `jobs.last_error` get the error text, so keep
+- **Idempotency.** Delivery is at least once. A crash, a deploy, or a lost
+  lock delivers the whole batch again, also its finished messages. Make a
+  second run safe: check the state first, use an upsert, or send the
+  message id as the idempotency key to an external service.
+- **Errors.** An error sends the message back (`pgque.nack`) after a
+  backoff: 15 s, doubled on each retry, up to 1 h, plus up to 25 %
+  jitter. After the `max_retries` of the queue, the message goes to the
+  dead letter queue (`pgque.dead_letter`). Wrap an error that a retry
+  cannot fix with `queue.Permanent` (a bad payload, a deleted row): the
+  message goes to the dead letter queue at once. A panic counts as an
+  error. The log and the dead letter reason get the error text, so keep
   private text out of it.
-- **Timeouts.** `Handle(kind, timeout, h)` sets the deadline of each run.
-  The handler must return when ctx ends. The lease of a run is the
-  timeout plus 30 s. After the lease, another worker can run the job.
+- **Timeouts.** `Handle(type, timeout, h)` sets the deadline of each run.
+  The handler must return when ctx ends. The messages of one consumer run
+  one after another, so a slow handler delays the rest of its queue.
 - **Payloads.** Store ids and small values, and read the rows in the
   handler. Never put a key, a password, a token, a prompt, or private
   text in a payload. The worker never logs a payload.
-- **Enqueue.** Enqueue in a repository method, in the transaction that
-  writes the rows: `jobs.Enqueue(ctx, tx, jobs.Params{...})` (see
+- **Send.** Send in a repository method, in the transaction that writes
+  the rows: `queue.Send(ctx, tx, "toy", "toy.send_receipt", payload)` (see
   database.md). A service has no pool, so a service never calls
-  `jobs.Enqueue` itself. `Params.RunAt` delays a job.
-- **Schedules.** `Schedule(kind, every, offset)` enqueues one job for
-  each slot, in UTC. `every = 24h` with `offset = 3h` runs daily at 03:00
-  UTC; a weekly slot starts on Monday. Each slot enqueues at most one job
-  across all replicas; a retry or a crash can run that job again. The
-  worker does not run the slots that it missed while it was down. A slot
-  is skipped while a job of the kind is queued or running, so two runs of
-  one schedule never overlap. Do not add a cron library.
+  `queue.Send` itself. PgQue 0.2 has no delayed delivery.
+- **Schedules.** `Schedule(queue, type, every, offset)` sends one message
+  for each slot, in UTC. `every = 24h` with `offset = 3h` runs daily at
+  03:00 UTC; a weekly slot starts on Monday. The `job_schedules` row of
+  the type keeps the last slot, so each slot goes out once, also after a
+  change of the active worker; a retry or a crash can run that message
+  again. The worker does not send the slots that it missed while no
+  worker ran. Do not add a cron library, and do not start the pg_cron
+  jobs of PgQue (`pgque.start()`): the active worker is the ticker.
 - **Models.** A job may call a model. The service sets the timeout of the
   call, and the call never runs inside a transaction (see Call a Model).
   Add the key to the `worker` environment in `docker-compose.yml`.
-- **Replicas.** Many workers can share one database. `FOR UPDATE SKIP
-  LOCKED` gives each job to one worker. The attempt number fences a stale
-  worker. The `job_schedules` upsert gives each slot to one replica.
-  Each process has its own pool, so keep the sum of the pools of all API
-  and worker replicas below `max_connections`. `workerConcurrency` (4)
-  caps the parallel jobs of one process.
-- **Shutdown.** SIGTERM stops the claims. The running jobs get 10 s; then
-  their contexts end, and they return to the queue at once. A stopped run
-  does not use up an attempt, but a `jobs.Permanent` error still fails
-  the job. Give the worker container a stop grace period of at least 15 s.
-- **Not included.** Priorities, unique jobs, job chains, and LISTEN/NOTIFY
-  (an idle claim loop polls once per second). Add one only when a feature
-  needs it.
+- **Replicas.** PgQue gives a batch to a consumer, not to a process, so
+  only one worker is active: the worker that holds the session advisory
+  lock. It runs the ticker, the maintenance, the schedules, and one
+  goroutine for each consumer. The other workers wait and take over when
+  the lock is free. More replicas give failover, not throughput. To spread
+  the load, give a feature its own queue. Do not use the cooperative
+  consumers of PgQue: they are experimental in 0.2. Each process has its
+  own pool, and the active worker keeps one connection for the lock, so
+  keep the sum of the pools of all API and worker replicas below
+  `max_connections`.
+- **Shutdown.** SIGTERM stops new batches. The running handlers get 10 s;
+  then their contexts end. A batch with a stopped handler stays open and
+  comes back as a whole, and the stopped run does not count as a retry.
+  Give the worker container a stop grace period of at least 15 s.
+- **Upgrade.** Never edit the vendored migration. To upgrade PgQue, add a
+  migration with the `sql/pgque.sql` of the new release (it upgrades in
+  place) and update `docs/third-party.md`.
+- **Not included.** Priorities, delayed messages, unique messages, and
+  LISTEN/NOTIFY wakeups (an idle consumer waits for a tick of the active
+  worker or 5 s). Add one only when a feature needs it.
 
 ## Errors
 
@@ -389,7 +415,7 @@ scheduled work.
 - Never `panic` in request paths; `RecoverPanics` is a last resort, not a
   control-flow mechanism.
 - Job handlers also return their errors. The worker logs each result
-  once and stores the error text in `jobs.last_error`.
+  once. A dead letter stores the error text as its reason.
 
 ## Logging
 
@@ -402,8 +428,8 @@ scheduled work.
   (`logger.ErrorContext(r.Context(), ...)`). The logging handler adds the
   context's correlation attributes to the record: `request_id` (seeded by
   `web.LogRequests`) and `user_id` (seeded by `auth.LoadIdentity`).
-  In a job, the worker adds `job_id`, `job_kind`, and `job_attempt` to
-  the context of the handler.
+  In a job, the worker adds `queue`, `consumer`, `message_id`,
+  `message_type`, and `message_retries` to the context of the handler.
   Outside requests (startup, shutdown, CLI), plain `Info`/`Error` is fine.
 - Middleware adds correlation attributes with
   `logging.WithAttrs(ctx, slog.String(...))` — never re-attach them by hand

@@ -13,8 +13,9 @@ import (
 )
 
 // TestWorkerDeletesExpiredSessions runs the worker as cmd/api wires it.
-// The hourly schedule enqueues the session cleanup, and the cleanup keeps
-// the live session.
+// The hourly schedule sends the session cleanup to the auth queue, the
+// consumer of the migration handles it, and the cleanup keeps the live
+// session.
 func TestWorkerDeletesExpiredSessions(t *testing.T) {
 	t.Parallel()
 	pool := testdb.New(t)
@@ -34,15 +35,16 @@ func TestWorkerDeletesExpiredSessions(t *testing.T) {
 	cfg := config.Load(func(string) string { return "" })
 	w := app.NewWorker(logging.New(io.Discard, cfg.LogLevel, logging.JSON), cfg, pool)
 
-	if _, err := w.RunDue(t.Context()); err != nil {
+	handled, err := w.RunDue(t.Context())
+	if err != nil {
 		t.Fatalf("RunDue: %v", err)
 	}
-
-	var status string
-	err = pool.QueryRow(t.Context(),
-		"SELECT status FROM jobs WHERE kind = 'auth.delete_expired_sessions'").Scan(&status)
-	if err != nil || status != "done" {
-		t.Fatalf("cleanup job status = %q, %v; want done", status, err)
+	if handled != 1 {
+		t.Fatalf("RunDue handled %d messages, want the one cleanup", handled)
+	}
+	var dead int
+	if err := pool.QueryRow(t.Context(), "SELECT count(*) FROM pgque.dead_letter").Scan(&dead); err != nil || dead != 0 {
+		t.Fatalf("dead letters = %d, %v; want 0", dead, err)
 	}
 	rows, _ := pool.Query(t.Context(), "SELECT token_hash FROM sessions")
 	left, err := pgx.CollectRows(rows, pgx.RowTo[string])
@@ -51,5 +53,9 @@ func TestWorkerDeletesExpiredSessions(t *testing.T) {
 	}
 	if len(left) != 1 || left[0] != "live" {
 		t.Errorf("sessions left = %v, want [live]", left)
+	}
+	// The slot of this hour is spent.
+	if handled, err := w.RunDue(t.Context()); err != nil || handled != 0 {
+		t.Errorf("second RunDue handled %d messages, %v; want 0", handled, err)
 	}
 }

@@ -26,16 +26,17 @@ services:
       postgres:
         condition: service_healthy
 
-  # The worker runs the background jobs (internal/platform/jobs) from the
-  # same image. Start more replicas with --scale worker=3: the queue gives
-  # each job to one replica. Add the keys that a job needs.
+  # The worker runs the background jobs (internal/platform/queue) from the
+  # same image. It also drives the PgQue ticker and maintenance. Start more
+  # replicas with --scale worker=3: one replica is active, and the others
+  # wait to take over. Add the keys that a job needs.
   worker:
     build: .
     command: ["worker"]
     environment:
       ENVIRONMENT: development
       DATABASE_URL: postgres://app:app@postgres:5432/app
-    # Run gives the running jobs 10s and then 2s more. The default 10s
+    # Run gives the running handlers 10s and then 2s more. The default 10s
     # stop period of Docker is too short.
     stop_grace_period: 15s
     depends_on:

@@ -2,8 +2,8 @@
 
 A minimal, feature-based Go web service template: stdlib `net/http`,
 PostgreSQL through pgx, server-rendered HTML with vendored htmx, embedded
-SQL migrations, a background job queue on PostgreSQL, `log/slog`, and
-tests against a real database. There are
+SQL migrations, background jobs on PgQue (a queue in PostgreSQL that a
+migration installs), `log/slog`, and tests against a real database. There are
 no frameworks, no ORM, and no DI container: `internal/app` wires
 everything explicitly.
 
@@ -18,7 +18,8 @@ the details.
 
 - Do not add a dependency. The only direct dependency is pgx. A model
   provider calls its API with `net/http`; never add the SDK of a
-  provider. [core.md]
+  provider. The job queue calls the SQL API of PgQue with pgx; do not add
+  a PgQue client module. [core.md]
 - Features never import each other. `internal/platform` never imports a
   feature. Only `internal/app` wires features: `app.go` the routes,
   `worker.go` the jobs. [core.md]
@@ -39,8 +40,9 @@ the details.
   `template.HTML` with user data; model output is user data. [security.md]
 - Only `config.Load` reads the environment. [core.md]
 - A job handler returns when its ctx ends, and a second run of the job is
-  safe. Enqueue a job only with `jobs.Enqueue`, in the transaction of the
-  write. Never put a secret or private text in a payload.
+  safe. Send a message only with `queue.Send`, in the transaction of the
+  write. Never put a secret or private text in a payload. Never edit the
+  vendored PgQue migration; upgrade it with a new migration.
   [core.md, database.md]
 - Never log a key, a password, a token, a prompt, a state, or an answer.
   [security.md]
@@ -57,7 +59,7 @@ the details.
 | Add a feature that calls a model | core.md "Model Providers" | copy `internal/chat/` (LLM) or `internal/triage/` (System One) |
 | Add a model provider | core.md "Add a Provider" | `internal/platform/llm/anthropic/`, `internal/platform/systemone/typesafe/` |
 | Add an API with the Chat Completions shape | core.md "Add a Provider" | one `chatcompletions.New` in `newLLM` (`internal/app/models.go`) |
-| Add a background or a scheduled job | core.md "Background Jobs" | `internal/auth/jobs.go`, `internal/app/worker.go` |
+| Add a background or a scheduled job | core.md "Background Jobs" | `internal/auth/jobs.go`, `internal/app/worker.go`, `migrations/*_create_auth_queue.sql` |
 | Add or change a route, a handler, a template | http.md | `internal/note/http.go` |
 | Stream a response (SSE) | http.md "Streaming (SSE)" | `internal/chat/http.go`, `internal/platform/web/sse.go` |
 | Change the schema | database.md "Migrations" | `just makemigration <name>` |
@@ -131,32 +133,39 @@ Request flow: `internal/app` (middleware + mux) → `internal/<feature>/http.go`
 Job flow: `cmd/api worker` → `app.NewWorker` → `internal/<feature>/jobs.go`
 → `service.go` → `repository.go` ← `postgres.go`
 
-Job life cycle: one row in `jobs`; only `internal/platform/jobs` writes
-the tables `jobs` and `job_schedules`.
+Job life cycle: one message in a PgQue queue (the `pgque` schema). Only
+`internal/platform/queue` calls PgQue and writes `job_schedules`.
 
-- `jobs.Enqueue` or a schedule slot inserts the row as `queued`.
-- A claim (`FOR UPDATE SKIP LOCKED`, one `UPDATE`) sets `running`, adds 1
-  to `attempts`, and sets the lease `locked_until` (the timeout + 30 s).
-- The handler result sets `done`, `queued` with a backoff (an error), or
-  `failed` (`jobs.Permanent`, or no attempts left). Each result `UPDATE`
-  matches the attempt number, so a stale worker changes nothing.
-- SIGTERM returns a running job to `queued` and gives back its attempt.
-  The cleanup (each minute) returns a job with an expired lease, and
-  deletes `done` after 24 h and `failed` after 7 days.
-- A handler that ignores ctx blocks its claim loop until the process
-  exits. A kind without a handler stays `queued` forever.
+- A migration creates the queue of a feature and subscribes the consumer
+  `worker` (`pgque.create_queue`, `pgque.subscribe`).
+- `queue.Send` or a schedule slot calls `pgque.send`. One worker is
+  active (a session advisory lock); it calls `pgque.ticker()` each second.
+  A tick closes a batch.
+- Each consumer opens its next batch, runs the handler of each message
+  type in order, and finishes the batch in one transaction: `pgque.nack`
+  for an error (a retry after a backoff, or the dead letter queue after
+  `max_retries`), `pgque.event_dead` for `queue.Permanent`, then
+  `pgque.ack`.
+- SIGTERM gives the handlers 10 s. A batch with a stopped handler stays
+  open and comes back as a whole, without the cost of a retry. A lost lock
+  stops the handlers at once.
+- The maintenance (each 10 s) moves the due retries, rotates the event
+  tables, and deletes dead letters after 7 days.
+- A handler that ignores ctx blocks its consumer until the process exits.
+  A type without a handler retries and then goes to the dead letter queue.
 - The rules: core.md "Background Jobs" and database.md "Background Jobs".
   Monitoring queries and limits: README "Operate the queue".
 
 ```
 cmd/api/          main, run(), subcommands (migrate, adduser, worker), debug listener
-migrations/       embedded SQL, append-only
+migrations/       embedded SQL, append-only; *_install_pgque.sql is vendored
 internal/
   platform/       shared infrastructure; imports no feature
     config/       Config, Load(getenv), Validate
     database/     pgx pool + migrator
     logging/      slog + context-carried log attributes
-    jobs/         job queue: Enqueue, Worker (Handle, Schedule, Run), retries, leases
+    queue/        jobs on PgQue: Send, Worker (Consumer, Handle, Schedule, Run),
+                  retries, dead letters, one active worker
     llm/          text models: Provider, Router, Fake; anthropic/ (Claude,
                   Bedrock), chatcompletions/ (Mistral, xAI, local servers);
                   both on net/http

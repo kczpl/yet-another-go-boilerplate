@@ -99,47 +99,48 @@ paths:
 
 ## Background Jobs
 
-- The tables `jobs` and `job_schedules` belong to
-  `internal/platform/jobs`. Only that package reads and writes them. A
-  feature adds a job only with `jobs.Enqueue`.
-- **Enqueue in the transaction of the write.** When a write must start a
-  job, enqueue the job in the same repository method and the same
-  transaction. A rollback then removes the job too, and the job never
+- The `pgque` schema belongs to PgQue, and the table `job_schedules`
+  belongs to `internal/platform/queue`. Only that package calls PgQue and
+  writes `job_schedules`. A feature sends a message only with
+  `queue.Send`. A migration creates the queue of a feature and subscribes
+  its consumer (see core.md "Background Jobs").
+- **Send in the transaction of the write.** When a write must start a job,
+  send the message in the same repository method and the same
+  transaction. A rollback then removes the message too, and the job never
   sees a row that does not exist:
 
   ```go
   // internal/toy/postgres.go
   err := pgx.BeginFunc(ctx, r.db, func(tx pgx.Tx) error {
   	// INSERT INTO toys ... RETURNING id
-  	_, err := jobs.Enqueue(ctx, tx, jobs.Params{
-  		Kind:    "toy.send_receipt",
-  		Payload: receipt{ToyID: id},
-  	})
+  	_, err := queue.Send(ctx, tx, "toy", "toy.send_receipt", receipt{ToyID: id})
   	return err
   })
   ```
 
-  Both `*pgxpool.Pool` and `pgx.Tx` satisfy `jobs.DB`. A job that does
-  not follow a write is a repository method that calls
-  `jobs.Enqueue(ctx, r.db, ...)`.
+  `*pgxpool.Pool`, `*pgxpool.Conn`, and `pgx.Tx` satisfy `queue.DB`. A
+  job that does not follow a write is a repository method that calls
+  `queue.Send(ctx, r.db, ...)`.
+- PgQue makes a message visible at the first tick after the commit. Never
+  send a message and wait for its handler in one transaction.
 - A job handler that calls a model or another service makes the call
   first and then writes the result in a short transaction (see
   Transactions).
 - Each statement of a job still has the 5 s `statement_timeout`. A job
   that changes many rows works in batches with a `LIMIT`, for example
   `auth.Service.DeleteExpired` (1000 rows per statement).
-- The worker deletes done jobs after 24 hours and failed jobs after 7
-  days. To run a failed job again, raise `max_attempts`. Never reset
-  `attempts`: the attempt number fences a stale worker.
+- PgQue empties its event tables with `TRUNCATE`, so they need no
+  autovacuum tuning. The worker deletes dead letters after 7 days. To run
+  a dead letter again, replay it: it returns to its queue as a new
+  message.
 
   ```sql
-  UPDATE jobs
-  SET status = 'queued', run_at = now(), max_attempts = attempts + 1, updated_at = now()
-  WHERE id = @id AND status = 'failed';
+  SELECT dl_id, dl_reason, ev_type FROM pgque.dlq_inspect('toy');
+  SELECT pgque.dlq_replay(@dl_id);
   ```
 
-- To see the state of the queue, run
-  `SELECT kind, status, count(*) FROM jobs GROUP BY kind, status`.
+- To see the state of the queues, run
+  `SELECT queue_name, consumer_name, lag, pending_events FROM pgque.get_consumer_info()`.
 
 ## Timeouts
 
