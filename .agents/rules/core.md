@@ -469,8 +469,8 @@ This template optimizes for readability and agentic editing, not DRY:
 - Loop variables are per-iteration — never write `x := x` captures.
 - `gofmt -l -w .` before finishing any task. `just lint` must pass — it
   runs `go vet`, `go fix -diff` (the Go modernizers; run `go fix ./...`
-  to apply them), staticcheck with all checks (version-pinned in the
-  justfile), and the gofmt check.
+  to apply them), staticcheck with all checks (version-pinned in
+  `tools.mod`), and the gofmt check.
 
 ## Development Checks
 
@@ -481,8 +481,11 @@ This template optimizes for readability and agentic editing, not DRY:
   are excluded because sequential assertions do not model application flow.
   Keep tests readable; do not split them merely to lower a score.
 - `just ci` runs lint, types, complexity, race tests, and govulncheck.
-  Tool versions live in the justfile. Keep tools outside the application
-  module, so they do not add dependencies to `go.mod`.
+  The `tool` directives in `tools.mod` pin the tool versions, and
+  `tools.sum` holds their checksums. The justfile runs each tool with
+  `go tool -modfile=tools.mod`. Keep tools out of `go.mod`, so the
+  application module has only pgx. To update a tool, run
+  `go get -tool -modfile=tools.mod <package>@<version>`.
 - The repository has no CI/CD pipeline. Run `just ci` before each commit.
   When the Dockerfile or the Go version changes, also run `docker build .`.
   Update the Go patch version in go.mod and Dockerfile together when
