@@ -134,9 +134,9 @@ func batchMessages(ctx context.Context, db querier, batchID int64) ([]Message, e
 // batch closes, its run count goes away, and the consumer moves past it.
 // A rollback leaves the batch open, so the next batch call delivers it
 // again. finishBatch sets the dead field of each failed result.
-func finishBatch(ctx context.Context, db *pgxpool.Pool, queue string, batchID int64, results []result) error {
+func finishBatch(ctx context.Context, db *pgxpool.Pool, queue, consumer string, batchID int64, results []result) error {
 	return pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
-		if err := storeFailures(ctx, tx, queue, batchID, results); err != nil {
+		if err := storeFailures(ctx, tx, queue, consumer, batchID, results); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `DELETE FROM queue_batch_runs WHERE batch_id = @batch_id`,
@@ -154,8 +154,14 @@ func finishBatch(ctx context.Context, db *pgxpool.Pool, queue string, batchID in
 }
 
 // storeFailures sends each failed message to the retry queue or to the
-// dead letter queue.
-func storeFailures(ctx context.Context, tx pgx.Tx, queue string, batchID int64, results []result) error {
+// dead letter queue, and sets its dead field. One statement reads the
+// batch once for all failed messages. Do not call pgque.nack for each
+// message: each call reads the whole batch again, so a large batch with
+// many failures cannot finish in time.
+//
+// The statement copies the stored message, as pgque.nack does. A retry
+// adds 1 to the retry count of the message.
+func storeFailures(ctx context.Context, tx pgx.Tx, queue, consumer string, batchID int64, results []result) error {
 	if !slices.ContainsFunc(results, func(r result) bool { return r.err != nil }) {
 		return nil
 	}
@@ -165,54 +171,54 @@ func storeFailures(ctx context.Context, tx pgx.Tx, queue string, batchID int64, 
 		pgx.NamedArgs{"queue": queue, "default": defaultMaxRetries}).Scan(&maxRetries); err != nil {
 		return err
 	}
-	for i := range results {
-		if err := storeFailure(ctx, tx, batchID, &results[i], maxRetries); err != nil {
-			return err
-		}
+	f := collectFailures(results, maxRetries)
+	tag, err := tx.Exec(ctx, `
+		SELECT CASE WHEN f.dead
+			THEN pgque.event_dead(@batch_id, e.ev_id, f.reason, e.ev_time, e.ev_txid::text::xid8,
+				e.ev_retry, e.ev_type, e.ev_data, e.ev_extra1, e.ev_extra2, e.ev_extra3, e.ev_extra4)
+			ELSE pgque.event_retry_raw(@queue, @consumer, now() + f.delay, e.ev_id, e.ev_time,
+				coalesce(e.ev_retry, 0) + 1, e.ev_type, e.ev_data,
+				e.ev_extra1, e.ev_extra2, e.ev_extra3, e.ev_extra4)
+		END
+		FROM unnest(@ids::bigint[], @delays::interval[], @reasons::text[], @dead::boolean[])
+			AS f (id, delay, reason, dead)
+		JOIN pgque.get_batch_events(@batch_id) AS e ON e.ev_id = f.id`,
+		pgx.NamedArgs{
+			"queue": queue, "consumer": consumer, "batch_id": batchID,
+			"ids": f.ids, "delays": f.delays, "reasons": f.reasons, "dead": f.dead,
+		})
+	if err == nil && tag.RowsAffected() != int64(len(f.ids)) {
+		err = errors.New("a failed message is not in the batch")
 	}
-	return nil
-}
-
-// storeFailure stores one failed message and sets r.dead. It ignores a
-// message without an error.
-func storeFailure(ctx context.Context, tx pgx.Tx, batchID int64, r *result, maxRetries int) error {
-	switch {
-	case r.err == nil:
-		return nil
-	case isPermanent(r.err):
-		r.dead = true
-		return deadLetter(ctx, tx, batchID, r.msg.ID, errorText(r.err))
-	default:
-		// pgque.nack makes the same decision.
-		r.dead = r.msg.Retries >= maxRetries
-		return nack(ctx, tx, batchID, r.msg.ID, r.delay, errorText(r.err))
-	}
-}
-
-// nack sends a message to the retry queue, or to the dead letter queue
-// when the message has no retries left. pgque.nack reads only the id from
-// the message row.
-func nack(ctx context.Context, tx pgx.Tx, batchID, msgID int64, delay time.Duration, reason string) error {
-	_, err := tx.Exec(ctx, `
-		SELECT pgque.nack(
-			@batch_id,
-			ROW(@msg_id::bigint, @batch_id::bigint, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)::pgque.message,
-			@delay::interval,
-			@reason)`,
-		pgx.NamedArgs{"batch_id": batchID, "msg_id": msgID, "delay": delay, "reason": reason})
 	return err
 }
 
-// deadLetter sends a message to the dead letter queue at once. It copies
-// the stored message, as pgque.nack does.
-func deadLetter(ctx context.Context, tx pgx.Tx, batchID, msgID int64, reason string) error {
-	var n int
-	return tx.QueryRow(ctx, `
-		SELECT pgque.event_dead(@batch_id, ev_id, @reason, ev_time, ev_txid::text::xid8, ev_retry,
-			ev_type, ev_data, ev_extra1, ev_extra2, ev_extra3, ev_extra4)
-		FROM pgque.get_batch_events(@batch_id)
-		WHERE ev_id = @msg_id`,
-		pgx.NamedArgs{"batch_id": batchID, "msg_id": msgID, "reason": reason}).Scan(&n)
+// failures holds the failed messages of a batch, one array for each
+// column of the unnest in storeFailures.
+type failures struct {
+	ids     []int64
+	delays  []time.Duration
+	reasons []string
+	dead    []bool
+}
+
+// collectFailures returns the failed messages of results and sets the
+// dead field of each. A message without retries left goes to the dead
+// letter queue, as in pgque.nack. A permanent error skips the retries.
+func collectFailures(results []result, maxRetries int) failures {
+	var f failures
+	for i := range results {
+		r := &results[i]
+		if r.err == nil {
+			continue
+		}
+		r.dead = isPermanent(r.err) || r.msg.Retries >= maxRetries
+		f.ids = append(f.ids, r.msg.ID)
+		f.delays = append(f.delays, r.delay)
+		f.reasons = append(f.reasons, errorText(r.err))
+		f.dead = append(f.dead, r.dead)
+	}
+	return f
 }
 
 // tick runs the PgQue ticker for all queues. A tick closes a batch: the

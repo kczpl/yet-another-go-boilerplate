@@ -143,10 +143,10 @@ Job life cycle: one message in a PgQue queue (the `pgque` schema). Only
   active (a session advisory lock); it calls `pgque.ticker()` each second.
   A tick closes a batch.
 - Each consumer opens its next batch, runs the handler of each message
-  type in order, and finishes the batch in one transaction: `pgque.nack`
-  for an error (a retry after a backoff, or the dead letter queue after
-  `max_retries`), `pgque.event_dead` for `queue.Permanent`, then
-  `pgque.ack`.
+  type in order, and finishes the batch in one transaction. One statement
+  reads the batch once and stores all failures: `pgque.event_retry_raw`
+  for a retry after a backoff, `pgque.event_dead` after `max_retries` or
+  for `queue.Permanent`. Then `pgque.ack` closes the batch.
 - SIGTERM gives the handlers 10 s. A batch with a stopped handler stays
   open and comes back as a whole, without the cost of a retry. A lost lock
   stops the handlers at once.

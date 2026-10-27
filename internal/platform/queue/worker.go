@@ -34,9 +34,9 @@ const (
 	// maintenance pass. Each statement also has the statement_timeout of
 	// the pool.
 	stepTimeout = 30 * time.Second
-	// finishTimeout limits the transaction that finishes a batch. Each
-	// failed message costs one statement, so a large batch can take some
-	// seconds.
+	// finishTimeout limits the transaction that finishes a batch. The
+	// transaction reads the batch once, so its time grows with the size
+	// of the batch.
 	finishTimeout = time.Minute
 	// shutdownGrace is the time that the running handlers get after Run
 	// ends. Then their contexts end. Keep the stop grace period of the

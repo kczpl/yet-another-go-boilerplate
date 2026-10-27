@@ -220,8 +220,7 @@ func TestFailedMessageRetriesWithBackoffThenGoesToTheDeadLetterQueue(t *testing.
 	})
 
 	runDue(t, w, 1)
-	// The first retry waits 15s plus up to 25% jitter. PgQue rounds the
-	// delay to whole seconds.
+	// The first retry waits 15s plus up to 25% jitter.
 	var delay float64
 	err := pool.QueryRow(t.Context(),
 		"SELECT extract(epoch FROM ev_retry_after - now()) FROM pgque.retry_queue").Scan(&delay)
@@ -245,8 +244,7 @@ func TestFailedMessageRetriesWithBackoffThenGoesToTheDeadLetterQueue(t *testing.
 	if len(seen) != 2 || seen[0] != 0 || seen[1] != 1 {
 		t.Errorf("retries seen = %v, want [0 1]", seen)
 	}
-	// The worker predicts the decision of pgque.nack for the log. A PgQue
-	// upgrade that changes the decision fails here.
+	// The log tells the decision that the worker stored.
 	for _, want := range []string{"it will retry", "it goes to the dead letter queue"} {
 		if n := strings.Count(logs.String(), want); n != 1 {
 			t.Errorf("the logs contain %q %d times, want once:\n%s", want, n, logs.String())
@@ -351,6 +349,38 @@ func TestFailureRetriesOnlyItsMessage(t *testing.T) {
 	if got := strings.Join(ran, " "); got != want {
 		t.Errorf("ran %s, want %s", got, want)
 	}
+}
+
+func TestLargeBatchOfFailuresFinishes(t *testing.T) {
+	t.Parallel()
+	pool := newPool(t)
+	// A worker that was down gets the whole backlog in one batch. When the
+	// finish reads the batch again for each failure, this batch does not
+	// finish within the finish timeout, and the consumer stops.
+	const n = 12000
+	exec(t, pool, `
+		SELECT pgque.send($1, 'test.backlog', jsonb_build_object('n', i))
+		FROM generate_series(1, $2) AS i`, testQueue, n)
+	w, c := newWorker(pool, io.Discard)
+	c.Handle("test.backlog", time.Minute, func(_ context.Context, msg queue.Message) error {
+		var p struct{ N int }
+		if err := json.Unmarshal(msg.Payload, &p); err != nil {
+			return err
+		}
+		if p.N%2 == 0 {
+			return queue.Permanent(errors.New("bad payload"))
+		}
+		return errors.New("boom")
+	})
+
+	runDue(t, w, n)
+	if got := retries(t, pool); got != n/2 {
+		t.Errorf("%d retries, want %d", got, n/2)
+	}
+	if got := count(t, pool, "SELECT count(*) FROM pgque.dead_letter"); got != n/2 {
+		t.Errorf("%d dead letters, want %d", got, n/2)
+	}
+	runDue(t, w, 0)
 }
 
 func TestLogsOmitThePayload(t *testing.T) {

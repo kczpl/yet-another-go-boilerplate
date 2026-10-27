@@ -347,13 +347,13 @@ for scheduled work.
   lock delivers the whole batch again, also its finished messages. Make a
   second run safe: check the state first, use an upsert, or send the
   message id as the idempotency key to an external service.
-- **Crashes.** PgQue counts a retry only at `pgque.nack`. A batch that
-  comes back open after a crash or a hang counts a run in
-  `queue_batch_runs`. After 3 runs, the worker skips the handlers and
-  sends each message to the retry queue, so a message that crashes the
-  process reaches the dead letter queue in the end. A graceful stop does
-  not count.
-- **Errors.** An error sends the message back (`pgque.nack`) after a
+- **Crashes.** PgQue counts a retry only when the worker sends the
+  message to the retry queue. A batch that comes back open after a crash
+  or a hang counts a run in `queue_batch_runs`. After 3 runs, the worker
+  skips the handlers and sends each message to the retry queue, so a
+  message that crashes the process reaches the dead letter queue in the
+  end. A graceful stop does not count.
+- **Errors.** An error sends the message to the retry queue after a
   backoff: 15 s, doubled on each retry, up to 1 h, plus up to 25 %
   jitter. After the `max_retries` of the queue, the message goes to the
   dead letter queue (`pgque.dead_letter`). Wrap an error that a retry
