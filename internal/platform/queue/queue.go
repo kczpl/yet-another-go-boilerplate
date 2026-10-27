@@ -10,10 +10,10 @@
 // receives the batches of each consumer, and runs the handler of each
 // message type.
 //
-// A failed message returns to the queue after a backoff (pgque.nack).
-// After the retry limit of its queue, the message goes to the dead letter
-// queue (pgque.dead_letter). A schedule sends a message once in each
-// interval.
+// A failed message returns to the queue after a backoff (the PgQue retry
+// queue). After the retry limit of its queue, the message goes to the
+// dead letter queue (pgque.dead_letter). A schedule sends a message once
+// in each interval.
 //
 // Many worker processes can share one database. One worker is active: it
 // holds a session advisory lock. The other workers wait and take over

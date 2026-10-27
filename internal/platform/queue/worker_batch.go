@@ -79,7 +79,7 @@ func (w *Worker) handleBatch(ctx, handlerCtx context.Context, c *Consumer) (int,
 	// The result must reach the database also after handlerCtx ends.
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(handlerCtx), finishTimeout)
 	defer cancel()
-	if err := finishBatch(finishCtx, w.db, c.queue, b.id, results); err != nil {
+	if err := finishBatch(finishCtx, w.db, c.queue, c.name, b.id, results); err != nil {
 		return len(b.msgs), true, fmt.Errorf("finishing batch %d of %s: %w", b.id, c.queue, err)
 	}
 	for _, r := range results {
@@ -208,7 +208,7 @@ func (w *Worker) logResult(ctx context.Context, r result) {
 // backoff returns the delay before the next delivery after retries
 // failed deliveries: 15s, 30s, 1m, and so on up to 1h, plus up to 25%
 // random jitter. The jitter spreads the retries of messages that failed
-// together. PgQue stores the delay in whole seconds.
+// together.
 func backoff(retries int) time.Duration {
 	d := min(15*time.Second<<min(max(retries, 0), 10), time.Hour)
 	return d + rand.N(d/4)

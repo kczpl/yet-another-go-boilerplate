@@ -404,7 +404,7 @@ batch. Then its cursor moves past the batch.
 producer ─────► queue log ─────► batch ────────────► consumer ─────► the cursor moves on
                     ▲                                    │
                     │ due after the backoff              │ handler error
-                    └──── retry queue ◄─── pgque.nack ◄──┤
+                    └──── retry queue ◄─── finish ◄──────┤
                                                          │ no retries left, or queue.Permanent
                                                          └──► dead letter queue (kept 7 days)
 ```
@@ -419,7 +419,9 @@ producer ─────► queue log ─────► batch ─────�
 4. **Handle.** The worker calls the handler of each message type, in
    order. The context of a handler ends at the timeout of its type.
 5. **Finish.** One transaction stores the results. A failed message goes
-   to the retry queue (`pgque.nack`) or to the dead letter queue. Then
+   to the retry queue (`pgque.event_retry_raw`) or to the dead letter
+   queue (`pgque.event_dead`). One statement stores all failures and reads
+   the batch only once, so a large batch also finishes quickly. Then
    `pgque.ack` closes the batch. A rollback leaves the batch open, so the
    next call delivers the whole batch again.
 6. **Maintain.** Every 10 seconds, the active worker moves the due
@@ -490,7 +492,7 @@ the `Jobs` function of each feature. It is the wiring point of the jobs, as
 
 ### Retries, schedules, and shutdown
 
-- **Retries.** A handler error sends the message back with `pgque.nack`
+- **Retries.** A handler error sends the message to the retry queue
   after a backoff: 15 s, 30 s, 1 min, and so on, up to 1 hour, plus up to
   25 % random jitter. After the retry limit of the queue (`max_retries`,
   default 5), the message goes to the dead letter queue with the error
@@ -499,9 +501,9 @@ the `Jobs` function of each feature. It is the wiring point of the jobs, as
 - **One failure, one retry.** A failure retries only its own message. The
   other messages of the batch are done.
 - **A batch that never finishes.** PgQue counts a retry only when the
-  worker calls `pgque.nack`. A handler that crashes the process (for
-  example, out of memory) or hangs without its context leaves the batch
-  open, and the batch comes back without a retry. So the worker counts
+  worker sends the message to the retry queue. A handler that crashes the
+  process (for example, out of memory) or hangs without its context
+  leaves the batch open, and the batch comes back without a retry. So the worker counts
   these runs in `queue_batch_runs`. After 3 runs that did not finish, it
   skips the handlers and sends each message of the batch to the retry
   queue (ERROR log `batch did not finish in earlier runs`). A message that
@@ -613,10 +615,6 @@ Know these limits before you depend on the queue:
   seconds after its backoff.
 - **A batch stays in memory.** The worker reads a whole batch at once,
   and a burst between two ticks makes a large batch. Keep payloads small.
-- **Many failures in one batch are slow to store.** `pgque.nack` reads the
-  batch again for each failed message, so the finish of a batch with n
-  failures does work in proportion to n². The worker gives the finish 1
-  minute.
 - **Not included:** priorities, delayed messages, unique messages, a
   cancel operation, LISTEN/NOTIFY wakeups, and an admin page. Add one only
   when a feature needs it.
