@@ -1,9 +1,10 @@
 set dotenv-load
 set positional-arguments
 
-staticcheck_version := "v0.8.2"
-gocognit_version := "v1.3.0"
-govulncheck_version := "v1.9.0"
+# tools.mod pins the versions of staticcheck, gocognit, and govulncheck.
+# go.mod stays free of the tools. Update a tool with
+# go get -tool -modfile=tools.mod <package>@<version>.
+tool := "go tool -modfile=tools.mod"
 
 default:
   @just --list
@@ -36,7 +37,7 @@ fmt:
 lint:
   go vet ./...
   go fix -diff ./...
-  go run honnef.co/go/tools/cmd/staticcheck@{{staticcheck_version}} -checks all ./...
+  {{tool}} staticcheck -checks all ./...
   @unformatted="$(gofmt -l .)"; if [ -n "$unformatted" ]; then echo "gofmt needed:"; echo "$unformatted"; exit 1; fi
 
 # Compile all packages and tests without a database.
@@ -45,7 +46,7 @@ types:
 
 # Limit cognitive complexity to 10 in application code and test support.
 complexity:
-  go run github.com/uudashr/gocognit/cmd/gocognit@{{gocognit_version}} -test=false -over 10 cmd internal migrations
+  {{tool}} gocognit -test=false -over 10 cmd internal migrations
 
 # Run the tests against PostgreSQL. Always run them without the result cache.
 test *flags:
@@ -79,4 +80,4 @@ makemigration name:
 
 # Check for known vulnerabilities with a pinned scanner and the live advisory database.
 vulncheck:
-  go run golang.org/x/vuln/cmd/govulncheck@{{govulncheck_version}} ./...
+  {{tool}} govulncheck ./...

@@ -6,3 +6,5 @@ bin
 docker-compose.yml
 Dockerfile
 justfile
+tools.mod
+tools.sum

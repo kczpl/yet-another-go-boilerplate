@@ -737,8 +737,10 @@ just vulncheck                        # govulncheck
 `just ci` runs lint (`go vet`, `go fix -diff`, staticcheck, gofmt), types,
 cognitive complexity (gocognit, at most 10), race tests against
 PostgreSQL, and govulncheck. The repository has no CI/CD pipeline, so
-run `just ci` before each commit. The justfile pins the tool versions,
-and the tools do not add application dependencies.
+run `just ci` before each commit. `tools.mod` pins the tool versions
+with `tool` directives, and the justfile runs them with
+`go tool -modfile=tools.mod`. The tools do not add application
+dependencies to `go.mod`.
 
 ## Conventions
 
