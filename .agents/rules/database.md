@@ -99,9 +99,9 @@ paths:
 
 ## Background Jobs
 
-- The `pgque` schema belongs to PgQue, and the table `job_schedules`
-  belongs to `internal/platform/queue`. Only that package calls PgQue and
-  writes `job_schedules`. A feature sends a message only with
+- The `pgque` schema belongs to PgQue, and the tables `job_schedules` and
+  `queue_batch_runs` belong to `internal/platform/queue`. Only that
+  package calls PgQue and writes these tables. A feature sends a message only with
   `queue.Send`. A migration creates the queue of a feature and subscribes
   its consumer (see core.md "Background Jobs").
 - **Send in the transaction of the write.** When a write must start a job,

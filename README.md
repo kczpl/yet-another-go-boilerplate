@@ -424,7 +424,9 @@ producer ─────► queue log ─────► batch ─────�
    next call delivers the whole batch again.
 6. **Maintain.** Every 10 seconds, the active worker moves the due
    retries back to their queues, runs the table rotation of PgQue, and
-   deletes the dead letters that are older than 7 days.
+   deletes the dead letters that are older than 7 days. The maintenance
+   runs in its own goroutine on the pool, so a slow pass does not delay
+   the ticks.
 
 PgQue does not update or delete a message row. Each queue writes into
 three tables, and PgQue empties the oldest table with `TRUNCATE` when all
@@ -448,7 +450,8 @@ SELECT pgque.subscribe('auth', 'worker');
 ```
 
 `Run` and `RunDue` stop with an error when a consumer has no
-subscription.
+subscription. A check that fails for another reason, for example during a
+database restart, retries every 5 seconds.
 
 ### Send a message
 
@@ -495,19 +498,32 @@ the `Jobs` function of each feature. It is the wiring point of the jobs, as
   example for a bad payload. A panic and a timeout count as errors.
 - **One failure, one retry.** A failure retries only its own message. The
   other messages of the batch are done.
+- **A batch that never finishes.** PgQue counts a retry only when the
+  worker calls `pgque.nack`. A handler that crashes the process (for
+  example, out of memory) or hangs without its context leaves the batch
+  open, and the batch comes back without a retry. So the worker counts
+  these runs in `queue_batch_runs`. After 3 runs that did not finish, it
+  skips the handlers and sends each message of the batch to the retry
+  queue (ERROR log `batch did not finish in earlier runs`). A message that
+  crashes each batch therefore reaches the dead letter queue in the end,
+  and the queue does not stop.
 - **A type without a handler** also retries and then goes to the dead
   letter queue. A consumer must handle every message type of its queue.
 - **Schedules.** `Schedule(queue, type, every, offset)` sends one message
   in each slot, in UTC. `every = 24h` and `offset = 3h` send it daily at
   03:00 UTC. The row of the type in `job_schedules` keeps the last slot,
   so each slot goes out once, also when another worker becomes active. A
-  slot that no worker saw does not run later. PgQue has no scheduler, so
-  this table is the only state of the template outside PgQue.
+  slot that no worker saw does not run later. A failed slot retries with
+  the backoff (about 8 minutes in total with 5 retries), so with a short
+  interval it can run after the next slot. PgQue has no scheduler, so
+  `job_schedules` and `queue_batch_runs` are the only tables of the
+  template queue code.
 - **Shutdown.** On SIGTERM, the worker stops opening batches and gives the
   running handlers 10 s. Then it cancels their contexts. A batch with a
   stopped handler stays open and comes back to the next active worker as
-  a whole. The stopped run does not count as a retry, so a deploy cannot
-  send a message to the dead letter queue. The compose
+  a whole. The stopped run does not count as a retry or as a run that did
+  not finish, so a deploy cannot send a message to the dead letter queue.
+  A failure before the stop in the same batch runs again too. The compose
   `stop_grace_period` of the worker is 15 s for this reason.
 
 To run a dead letter again, replay it. It goes back to its queue as a new
@@ -527,7 +543,8 @@ read the same consumer get the same batch. So only one worker is active:
 - Each worker tries to take a session advisory lock. The worker with the
   lock is active: it runs the ticker, the maintenance, the schedules, and
   the consumers. Each consumer runs in its own goroutine, one batch at a
-  time.
+  time. Only the ticker uses the lock connection, so each tick also checks
+  the lock.
 - The other workers wait and try again every 5 seconds. When the active
   worker stops or its database session ends, the lock is free, and a
   waiting worker takes over.
@@ -596,6 +613,10 @@ Know these limits before you depend on the queue:
   seconds after its backoff.
 - **A batch stays in memory.** The worker reads a whole batch at once,
   and a burst between two ticks makes a large batch. Keep payloads small.
+- **Many failures in one batch are slow to store.** `pgque.nack` reads the
+  batch again for each failed message, so the finish of a batch with n
+  failures does work in proportion to n². The worker gives the finish 1
+  minute.
 - **Not included:** priorities, delayed messages, unique messages, a
   cancel operation, LISTEN/NOTIFY wakeups, and an admin page. Add one only
   when a feature needs it.

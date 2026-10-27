@@ -134,7 +134,8 @@ Job flow: `cmd/api worker` → `app.NewWorker` → `internal/<feature>/jobs.go`
 → `service.go` → `repository.go` ← `postgres.go`
 
 Job life cycle: one message in a PgQue queue (the `pgque` schema). Only
-`internal/platform/queue` calls PgQue and writes `job_schedules`.
+`internal/platform/queue` calls PgQue and writes `job_schedules` and
+`queue_batch_runs`.
 
 - A migration creates the queue of a feature and subscribes the consumer
   `worker` (`pgque.create_queue`, `pgque.subscribe`).
@@ -149,6 +150,9 @@ Job life cycle: one message in a PgQue queue (the `pgque` schema). Only
 - SIGTERM gives the handlers 10 s. A batch with a stopped handler stays
   open and comes back as a whole, without the cost of a retry. A lost lock
   stops the handlers at once.
+- A batch that comes back open after a crash counts a run in
+  `queue_batch_runs`. After 3 such runs, the worker skips the handlers and
+  sends each message to the retry queue.
 - The maintenance (each 10 s) moves the due retries, rotates the event
   tables, and deletes dead letters after 7 days.
 - A handler that ignores ctx blocks its consumer until the process exits.
