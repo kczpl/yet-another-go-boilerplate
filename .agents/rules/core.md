@@ -347,6 +347,12 @@ for scheduled work.
   lock delivers the whole batch again, also its finished messages. Make a
   second run safe: check the state first, use an upsert, or send the
   message id as the idempotency key to an external service.
+- **Crashes.** PgQue counts a retry only at `pgque.nack`. A batch that
+  comes back open after a crash or a hang counts a run in
+  `queue_batch_runs`. After 3 runs, the worker skips the handlers and
+  sends each message to the retry queue, so a message that crashes the
+  process reaches the dead letter queue in the end. A graceful stop does
+  not count.
 - **Errors.** An error sends the message back (`pgque.nack`) after a
   backoff: 15 s, doubled on each retry, up to 1 h, plus up to 25 %
   jitter. After the `max_retries` of the queue, the message goes to the
@@ -370,15 +376,17 @@ for scheduled work.
   03:00 UTC; a weekly slot starts on Monday. The `job_schedules` row of
   the type keeps the last slot, so each slot goes out once, also after a
   change of the active worker; a retry or a crash can run that message
-  again. The worker does not send the slots that it missed while no
-  worker ran. Do not add a cron library, and do not start the pg_cron
+  again. A failed slot retries with the backoff, so with a short interval
+  it can run after the next slot. The worker does not send the slots that
+  it missed while no worker ran. Do not add a cron library, and do not start the pg_cron
   jobs of PgQue (`pgque.start()`): the active worker is the ticker.
 - **Models.** A job may call a model. The service sets the timeout of the
   call, and the call never runs inside a transaction (see Call a Model).
   Add the key to the `worker` environment in `docker-compose.yml`.
 - **Replicas.** PgQue gives a batch to a consumer, not to a process, so
   only one worker is active: the worker that holds the session advisory
-  lock. It runs the ticker, the maintenance, the schedules, and one
+  lock. It runs the ticker on the lock connection (each tick also checks
+  the lock), the maintenance and the schedules on the pool, and one
   goroutine for each consumer. The other workers wait and take over when
   the lock is free. More replicas give failover, not throughput. To spread
   the load, give a feature its own queue. Do not use the cooperative

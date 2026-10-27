@@ -21,6 +21,8 @@ const (
 	// maxRetryCalls caps the calls of pgque.maint_retry_events in one
 	// maintenance pass. One call moves at most 10 messages.
 	maxRetryCalls = 100
+	// unlockTimeout limits the release of the worker lock.
+	unlockTimeout = 5 * time.Second
 )
 
 // querier runs SQL on a pool, on a pool connection, or in a transaction.
@@ -46,6 +48,53 @@ func subscribed(ctx context.Context, db querier, queue, consumer string) (bool, 
 		SELECT EXISTS (SELECT 1 FROM pgque.get_consumer_info(@queue, @consumer))`,
 		pgx.NamedArgs{"queue": queue, "consumer": consumer}).Scan(&ok)
 	return ok, err
+}
+
+// currentBatch returns the open batch of consumer, and false when the
+// consumer has no open batch.
+func currentBatch(ctx context.Context, db querier, queue, consumer string) (int64, bool, error) {
+	var id *int64
+	err := db.QueryRow(ctx, `SELECT current_batch FROM pgque.get_consumer_info(@queue, @consumer)`,
+		pgx.NamedArgs{"queue": queue, "consumer": consumer}).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) || id == nil {
+		// Without a subscription, pgque.next_batch returns the error.
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return *id, true, nil
+}
+
+// countRun adds 1 to the runs of a batch that did not finish and returns
+// the new count.
+func countRun(ctx context.Context, db querier, batchID int64) (int, error) {
+	var runs int
+	err := db.QueryRow(ctx, `
+		INSERT INTO queue_batch_runs (batch_id, runs) VALUES (@batch_id, 1)
+		ON CONFLICT (batch_id) DO UPDATE SET runs = queue_batch_runs.runs + 1, updated_at = now()
+		RETURNING runs`,
+		pgx.NamedArgs{"batch_id": batchID}).Scan(&runs)
+	return runs, err
+}
+
+// uncountRun takes 1 from the runs of a batch. A stopped batch then
+// keeps its count when the next open adds 1.
+func uncountRun(ctx context.Context, db querier, batchID int64) error {
+	_, err := db.Exec(ctx, `
+		INSERT INTO queue_batch_runs (batch_id, runs) VALUES (@batch_id, -1)
+		ON CONFLICT (batch_id) DO UPDATE SET runs = queue_batch_runs.runs - 1, updated_at = now()`,
+		pgx.NamedArgs{"batch_id": batchID})
+	return err
+}
+
+// purgeRuns deletes the run counts that did not change for keep. A
+// finished batch deletes its own count, so only the counts of batches that
+// a person closed by hand stay behind.
+func purgeRuns(ctx context.Context, db querier, keep time.Duration) error {
+	_, err := db.Exec(ctx, `DELETE FROM queue_batch_runs WHERE updated_at < now() - @keep::interval`,
+		pgx.NamedArgs{"keep": keep})
+	return err
 }
 
 // nextBatch opens the next batch of consumer and returns its id. A batch
@@ -82,12 +131,16 @@ func batchMessages(ctx context.Context, db querier, batchID int64) ([]Message, e
 
 // finishBatch stores the results of a batch in one transaction. A failed
 // message goes to the retry queue or to the dead letter queue. Then the
-// batch closes, and the consumer moves past it. A rollback leaves the
-// batch open, so the next batch call delivers it again. finishBatch sets
-// the dead field of each failed result.
+// batch closes, its run count goes away, and the consumer moves past it.
+// A rollback leaves the batch open, so the next batch call delivers it
+// again. finishBatch sets the dead field of each failed result.
 func finishBatch(ctx context.Context, db *pgxpool.Pool, queue string, batchID int64, results []result) error {
 	return pgx.BeginFunc(ctx, db, func(tx pgx.Tx) error {
 		if err := storeFailures(ctx, tx, queue, batchID, results); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM queue_batch_runs WHERE batch_id = @batch_id`,
+			pgx.NamedArgs{"batch_id": batchID}); err != nil {
 			return err
 		}
 		var finished int
@@ -259,7 +312,7 @@ func tryLock(ctx context.Context, pool *pgxpool.Pool) (*pgxpool.Conn, error) {
 // If the unlock fails, it closes the connection: the server then drops
 // every lock of the session.
 func unlock(conn *pgxpool.Conn) {
-	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), unlockTimeout)
 	defer cancel()
 	var unlocked bool
 	err := conn.QueryRow(ctx, `SELECT pg_advisory_unlock($1)`, workerLockID).Scan(&unlocked)
@@ -273,7 +326,7 @@ func unlock(conn *pgxpool.Conn) {
 // closeConn closes the connection and gives it back to the pool, which
 // then drops it.
 func closeConn(conn *pgxpool.Conn) {
-	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), unlockTimeout)
 	defer cancel()
 	_ = conn.Conn().Close(ctx)
 	conn.Release()

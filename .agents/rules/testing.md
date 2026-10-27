@@ -102,12 +102,18 @@ pool := testdb.New(t) // private, fully migrated database; dropped on cleanup
   (`makeRetriesDue`). A test of `Run` sets short intervals with
   `SetIntervals` and waits for a handler signal or a log record, never
   for time. `export_test.go` also gives the tests `SetClock` (the clock
-  of the schedules), `SetShutdownGrace`, and `WorkerLockID`. Keep the
-  tests of these invariants: a send joins the transaction, a failure
-  retries only its message with the backoff and then goes to the dead
-  letter queue, `Permanent` skips the retries, each schedule slot goes
-  out once across workers, one worker is active and another worker takes
-  over, a lost lock stops the handlers, the maintenance rotates the
+  of the schedules), `SetShutdownGrace`, and `WorkerLockID`. A test
+  simulates a crash with `openBatchAndCrash`: it opens a batch with SQL
+  and stores the earlier runs. `queue_test.go` covers the send, the
+  handlers, the retries, the dead letters, the batch runs, and the
+  maintenance; `worker_test.go` covers the registration, the schedules,
+  and `Run`. Keep the tests of these invariants: a send joins the
+  transaction, a failure retries only its message with the backoff and
+  then goes to the dead letter queue, the log names that result,
+  `Permanent` skips the retries, a batch that does not finish in 3 runs
+  retries its messages, each schedule slot goes out once across workers,
+  one worker is active and another worker takes over, a lost lock stops
+  the handlers, the startup check retries, the maintenance rotates the
   tables and purges old dead letters, the logs omit the payload, and a
   shutdown finishes the batch or returns it without the cost of a retry.
 - A feature with jobs tests the rules in `service_test.go` and the
